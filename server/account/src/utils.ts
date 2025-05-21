@@ -41,6 +41,7 @@ import otpGenerator from 'otp-generator'
 import { Analytics } from '@hcengineering/analytics'
 import { sharedPipelineContextVars } from '@hcengineering/server-pipeline'
 import { decodeTokenVerbose, generateToken, TokenError } from '@hcengineering/server-token'
+import { isAdminEmail } from './admin'
 import { MongoAccountDB } from './collections/mongo'
 import { PostgresAccountDB } from './collections/postgres/postgres'
 import { accountPlugin } from './plugin'
@@ -61,7 +62,6 @@ import {
   type SocialId,
   type Workspace
 } from './types'
-import { isAdminEmail } from './admin'
 
 export const GUEST_ACCOUNT = 'b6996120-416f-49cd-841e-e4a5d2e49c9b'
 
@@ -526,12 +526,14 @@ export async function selectWorkspace (
   token: string | undefined,
   params: {
     workspaceUrl: string
+    singleWorkspace?: boolean
     kind: 'external' | 'internal' | 'byregion'
     externalRegions?: string[]
   },
   meta?: Meta
 ): Promise<WorkspaceLoginInfo> {
   const { workspaceUrl, kind, externalRegions = [] } = params
+  const singleWorkspace = params.singleWorkspace ?? true
   const { account: accountUuid, workspace: tokenWorkspaceUuid, extra } = decodeTokenVerbose(ctx, token ?? '')
   const getKind = (region: string | undefined): EndpointKind => {
     switch (kind) {
@@ -569,6 +571,32 @@ export async function selectWorkspace (
 
   if (accountUuid !== systemAccountUuid && account == null) {
     throw new PlatformError(new Status(Severity.ERROR, platform.status.AccountNotFound, {}))
+  }
+
+  if (!singleWorkspace && account != null) {
+    const workspace = await getWorkspaceByUrl(db, workspaceUrl)
+    if (workspace == null && workspaceUrl !== '') {
+      ctx.error('Workspace not found in selectWorkspace', { workspaceUrl, kind, accountUuid, extra })
+      throw new PlatformError(new Status(Severity.ERROR, platform.status.WorkspaceNotFound, { workspaceUrl }))
+    }
+
+    // We need to create a personal workspace for the account.
+    const personalWorkspace = await getPersonalWorkspace(db, account)
+
+    // Do not check for workspace if we are in multi workspace mode.
+    return {
+      account: accountUuid,
+      // We should use a personal workspace as endpoint for person.
+      endpoint: getEndpoint(personalWorkspace.uuid, personalWorkspace.region, getKind(personalWorkspace.region)),
+      workspace: workspace?.uuid ?? personalWorkspace.uuid,
+      workspaceUrl: workspace?.url ?? personalWorkspace.url,
+      workspaceDataId: workspace?.dataId ?? personalWorkspace.dataId,
+      role:
+        workspace != null
+          ? (await db.getWorkspaceRole(accountUuid, workspace.uuid)) ?? AccountRole.User
+          : AccountRole.Owner, // Think about more correct role
+      token: generateToken(accountUuid, '' as WorkspaceUuid, extra) // Generate multi workspace token
+    }
   }
 
   let workspace: Workspace | null
@@ -629,6 +657,44 @@ export async function selectWorkspace (
     workspaceDataId: workspace.dataId,
     role
   }
+}
+
+export async function getPersonalWorkspace (db: AccountDB, account: Account): Promise<Workspace> {
+  let personalWorkspace = await getWorkspaceById(db, account.uuid as any as WorkspaceUuid)
+  if (personalWorkspace == null) {
+    // We need to create a personal workspace for the account.
+    await db.createWorkspace(
+      {
+        uuid: account.uuid as any as WorkspaceUuid,
+        name: 'Personal',
+        url: '',
+        branding: 'personal',
+        personal: true,
+        region:
+          getRegions()
+            .filter((it) => it.name !== '')
+            .shift()?.name ?? ''
+      },
+      {
+        mode: 'active',
+        versionMajor: 0,
+        versionMinor: 0,
+        versionPatch: 0,
+        isDisabled: false
+      }
+    )
+    personalWorkspace = await getWorkspaceById(db, account.uuid as any as WorkspaceUuid)
+  }
+  if (personalWorkspace == null) {
+    throw new PlatformError(new Status(Severity.ERROR, platform.status.WorkspaceNotFound, {}))
+  }
+
+  const currentRole = await db.getWorkspaceRole(account.uuid, personalWorkspace.uuid)
+
+  if (currentRole == null) {
+    await db.assignWorkspace(account.uuid, personalWorkspace.uuid, AccountRole.Owner)
+  }
+  return personalWorkspace
 }
 
 export async function updateWorkspaceRole (

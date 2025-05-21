@@ -1,6 +1,5 @@
 <!--
-// Copyright © 2020, 2021 Anticrm Platform Contributors.
-// Copyright © 2021 Hardcore Engineering Inc.
+// Copyright © 2020 Anticrm Platform Contributors.
 //
 // Licensed under the Eclipse Public License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License. You may
@@ -14,18 +13,7 @@
 // limitations under the License.
 -->
 <script lang="ts">
-  import type { Space } from '@hcengineering/core'
-  import { singleWorkspace, getClient } from '@hcengineering/presentation'
-
-  export let value: Space
-  export let accent = false
+  import WorkbenchApp from './WorkbenchApp.svelte'
 </script>
 
-{#if value}
-  <span class:fs-bold={accent}>
-    {value.name}
-    {#if !$singleWorkspace}
-      {getClient().getWorkspaces()[value._uuid]?.name}
-    {/if}
-  </span>
-{/if}
+<WorkbenchApp singleWorkspace={false} />

@@ -14,26 +14,35 @@
 //
 
 import { Analytics } from '@hcengineering/analytics'
+import { deepEqual } from 'fast-equals'
 import { BackupClient, DocChunk } from './backup'
-import { Class, DOMAIN_MODEL, Doc, Domain, Ref, Timestamp } from './classes'
+import { Class, DOMAIN_MODEL, Doc, Domain, Ref, Timestamp, type Account, type AccountWorkspace } from './classes'
 import core from './component'
 import { Hierarchy } from './hierarchy'
 import { MeasureContext, MeasureMetricsContext } from './measurements'
 import { ModelDb } from './memdb'
 import type { DocumentQuery, FindOptions, FindResult, FulltextStorage, Storage, TxResult, WithLookup } from './storage'
 import { SearchOptions, SearchQuery, SearchResult } from './storage'
-import { Tx, TxCUD, WorkspaceEvent, type TxWorkspaceEvent } from './tx'
-import { platformNow, platformNowDiff, toFindResult } from './utils'
+import { Tx, TxCUD, TxProcessor, WorkspaceEvent, type TxWorkspaceEvent } from './tx'
+import { platformNow, platformNowDiff, toFindResult, type WorkspaceUuid } from './utils'
 
 /**
  * @public
  */
 export type TxHandler = (...tx: Tx[]) => void
 
+export interface WorkspacesClient {
+  // Get a list of active workspaces, not in maintenance mode and enabled.
+  getAvailableWorkspaces: () => WorkspaceUuid[]
+
+  // A list of active workspaces, workspace could be disabled or in maintenance mode, in this case it will not be here.
+  getWorkspaces: () => Record<WorkspaceUuid, AccountWorkspace>
+}
+
 /**
  * @public
  */
-export interface Client extends Storage, FulltextStorage {
+export interface Client extends Storage, FulltextStorage, WorkspacesClient {
   notify?: (...tx: Tx[]) => void
   getHierarchy: () => Hierarchy
   getModel: () => ModelDb
@@ -73,31 +82,73 @@ export enum ClientConnectEvent {
 
 export type Handler = (...result: any[]) => void
 
+export interface ConnectionEvents {
+  onHello?: (serverVersion?: string) => boolean
+  onUnauthorized?: () => void
+  onConnect?: (
+    event: ClientConnectEvent,
+    lastTx: Record<WorkspaceUuid, string | undefined> | undefined,
+    data: any
+  ) => Promise<void>
+  onDialTimeout?: () => void | Promise<void>
+  onAccount?: (account: Account) => void
+}
+
 /**
  * @public
  */
 export interface ClientConnection extends Storage, FulltextStorage, BackupClient {
   isConnected: () => boolean
-
   close: () => Promise<void>
-  onConnect?: (event: ClientConnectEvent, lastTx: string | undefined, data: any) => Promise<void>
 
   // If hash is passed, will return LoadModelResponse
   loadModel: (last: Timestamp, hash?: string) => Promise<Tx[] | LoadModelResponse>
-
-  getLastHash?: (ctx: MeasureContext) => Promise<string | undefined>
+  getLastHash?: (ctx: MeasureContext) => Promise<Record<WorkspaceUuid, string | undefined>>
   pushHandler: (handler: Handler) => void
+  getAccount: () => Promise<Account>
+}
+
+function isModelDomain (tx: Tx, h: Hierarchy): boolean {
+  return TxProcessor.isExtendsCUD(tx._class) ? h.findDomain((tx as TxCUD<Doc>).objectClass) === DOMAIN_MODEL : false
 }
 
 class ClientImpl implements Client, BackupClient {
   notify?: (...tx: Tx[]) => void
   hierarchy!: Hierarchy
   model!: ModelDb
+
+  account: Account
+
+  workspaces: Record<WorkspaceUuid, AccountWorkspace> = {}
+  availableWorkspaces: WorkspaceUuid[] = []
+
   private readonly appliedModelTransactions = new Set<Ref<Tx>>()
-  constructor (private readonly conn: ClientConnection) {}
+  constructor (
+    private readonly conn: ClientConnection,
+    account: Account
+  ) {
+    this.account = account
+  }
+
+  onAccount (account: Account): void {
+    // Do diff and notify about workspace changes.
+    this.account = account
+    this.workspaces = account.workspaces
+    this.availableWorkspaces = Object.entries(this.workspaces)
+      .filter((it) => !it[1].maintenance && it[1].enabled)
+      .map((it) => it[0] as WorkspaceUuid)
+  }
 
   getConnection (): ClientConnection {
     return this.conn
+  }
+
+  getWorkspaces (): Record<WorkspaceUuid, AccountWorkspace> {
+    return this.workspaces
+  }
+
+  getAvailableWorkspaces (): WorkspaceUuid[] {
+    return this.availableWorkspaces
   }
 
   setModel (hierarchy: Hierarchy, model: ModelDb): void {
@@ -146,7 +197,7 @@ class ClientImpl implements Client, BackupClient {
   }
 
   async tx (tx: Tx): Promise<TxResult> {
-    if (tx.objectSpace === core.space.Model) {
+    if (isModelDomain(tx, this.hierarchy)) {
       this.hierarchy.tx(tx)
       await this.model.tx(tx)
       this.appliedModelTransactions.add(tx._id)
@@ -158,7 +209,7 @@ class ClientImpl implements Client, BackupClient {
   async updateFromRemote (...tx: Tx[]): Promise<void> {
     for (const t of tx) {
       try {
-        if (t.objectSpace === core.space.Model) {
+        if (isModelDomain(t, this.hierarchy)) {
           const hasTx = this.appliedModelTransactions.has(t._id)
           if (!hasTx) {
             this.hierarchy.tx(t)
@@ -218,17 +269,21 @@ export interface TxPersistenceStore {
 
 export type ModelFilter = (tx: Tx[]) => Tx[]
 
+export interface ClientConnectOptions extends ConnectionEvents {
+  modelFilter?: ModelFilter
+  txPersistence?: TxPersistenceStore
+  _ctx?: MeasureContext
+}
+
 /**
  * @public
  */
 export async function createClient (
-  connect: (txHandler: TxHandler) => Promise<ClientConnection>,
+  connect: (txHandler: TxHandler, events?: ConnectionEvents) => Promise<ClientConnection>,
   // If set will build model with only allowed plugins.
-  modelFilter?: ModelFilter,
-  txPersistence?: TxPersistenceStore,
-  _ctx?: MeasureContext
+  opt?: ClientConnectOptions
 ): Promise<Client> {
-  const ctx = _ctx ?? new MeasureMetricsContext('createClient', {})
+  const ctx = opt?._ctx ?? new MeasureMetricsContext('createClient', {})
   let client: ClientImpl | null = null
 
   // Temporal buffer, while we apply model
@@ -237,7 +292,7 @@ export async function createClient (
   let hierarchy = new Hierarchy()
   let model = new ModelDb(hierarchy)
 
-  let lastTx: string | undefined
+  let lastTx: Record<WorkspaceUuid, string | undefined> | undefined
 
   function txHandler (...tx: Tx[]): void {
     if (tx == null || tx.length === 0) {
@@ -255,84 +310,97 @@ export async function createClient (
       }
     }
   }
-  const conn = await ctx.with('connect', {}, () => connect(txHandler))
+  let account: Account | undefined
+  const conn = await ctx.with('connect', {}, () =>
+    connect(txHandler, {
+      ...opt,
+      onAccount: (a) => {
+        account = a
+        client?.onAccount(account)
+        opt?.onAccount?.(a)
+      },
+      onConnect: async (event, _lastTx, data) => {
+        console.log('Client: onConnect', event)
+        if (event === ClientConnectEvent.Maintenance) {
+          lastTx = _lastTx
+          await opt?.onConnect?.(event, _lastTx, data)
+          return
+        }
+        // Find all new transactions and apply
+        let { mode, current, addition } = await ctx.with('load-model', {}, (ctx) =>
+          loadModel(ctx, conn, opt?.txPersistence)
+        )
 
-  let { mode, current, addition } = await ctx.with('load-model', {}, (ctx) => loadModel(ctx, conn, txPersistence))
+        switch (mode) {
+          case 'upgrade':
+            // We have upgrade procedure and need rebuild all stuff.
+            hierarchy = new Hierarchy()
+            model = new ModelDb(hierarchy)
+            ;(client as ClientImpl).setModel(hierarchy, model)
+
+            ctx.withSync('build-model', {}, (ctx) => {
+              buildModel(ctx, current, opt?.modelFilter, hierarchy, model)
+            })
+            current = []
+            // No need to fetch more stuff since upgrade was happened.
+            break
+          case 'addition':
+            ctx.withSync('build-model', {}, (ctx) => {
+              buildModel(ctx, current.concat(addition), opt?.modelFilter, hierarchy, model)
+            })
+            break
+        }
+        current = []
+        addition = []
+
+        if (lastTx === undefined) {
+          // No need to do anything here since we connected.
+          await opt?.onConnect?.(event, _lastTx, data)
+          lastTx = _lastTx
+          return
+        }
+
+        if (deepEqual(lastTx, _lastTx)) {
+          // Same lastTx, no need to refresh
+          await opt?.onConnect?.(ClientConnectEvent.Reconnected, _lastTx, data)
+          return
+        }
+        lastTx = _lastTx
+        // We need to trigger full refresh on queries, etc.
+        await opt?.onConnect?.(ClientConnectEvent.Refresh, lastTx, data)
+      }
+    })
+  )
+
+  if (account === undefined) {
+    account = await conn.getAccount()
+    opt?.onAccount?.(account)
+  }
+
+  let { mode, current, addition } = await ctx.with('load-model', {}, (ctx) => loadModel(ctx, conn, opt?.txPersistence))
   switch (mode) {
     case 'same':
     case 'upgrade':
       ctx.withSync('build-model', {}, (ctx) => {
-        buildModel(ctx, current, modelFilter, hierarchy, model)
+        buildModel(ctx, current, opt?.modelFilter, hierarchy, model)
       })
       break
     case 'addition':
       ctx.withSync('build-model', {}, (ctx) => {
-        buildModel(ctx, current.concat(addition), modelFilter, hierarchy, model)
+        buildModel(ctx, current.concat(addition), opt?.modelFilter, hierarchy, model)
       })
   }
   current = []
   addition = []
 
-  txBuffer = txBuffer.filter((tx) => tx.space !== core.space.Model)
+  txBuffer = txBuffer.filter((tx) => !isModelDomain(tx, hierarchy))
 
-  client = new ClientImpl(conn)
+  client = new ClientImpl(conn, account)
   client.setModel(hierarchy, model)
+  client.onAccount(account)
 
   txHandler(...txBuffer)
   txBuffer = undefined
-
-  const oldOnConnect:
-  | ((event: ClientConnectEvent, lastTx: string | undefined, data: any) => Promise<void>)
-  | undefined = conn.onConnect
-  conn.onConnect = async (event, _lastTx, data) => {
-    console.log('Client: onConnect', event)
-    if (event === ClientConnectEvent.Maintenance) {
-      lastTx = _lastTx
-      await oldOnConnect?.(ClientConnectEvent.Maintenance, _lastTx, data)
-      return
-    }
-    // Find all new transactions and apply
-    let { mode, current, addition } = await ctx.with('load-model', {}, (ctx) => loadModel(ctx, conn, txPersistence))
-
-    switch (mode) {
-      case 'upgrade':
-        // We have upgrade procedure and need rebuild all stuff.
-        hierarchy = new Hierarchy()
-        model = new ModelDb(hierarchy)
-        ;(client as ClientImpl).setModel(hierarchy, model)
-
-        ctx.withSync('build-model', {}, (ctx) => {
-          buildModel(ctx, current, modelFilter, hierarchy, model)
-        })
-        current = []
-        await oldOnConnect?.(ClientConnectEvent.Upgraded, _lastTx, data)
-        // No need to fetch more stuff since upgrade was happened.
-        break
-      case 'addition':
-        ctx.withSync('build-model', {}, (ctx) => {
-          buildModel(ctx, current.concat(addition), modelFilter, hierarchy, model)
-        })
-        break
-    }
-    current = []
-    addition = []
-
-    if (lastTx === undefined) {
-      // No need to do anything here since we connected.
-      await oldOnConnect?.(event, _lastTx, data)
-      lastTx = _lastTx
-      return
-    }
-
-    if (lastTx === _lastTx) {
-      // Same lastTx, no need to refresh
-      await oldOnConnect?.(ClientConnectEvent.Reconnected, _lastTx, data)
-      return
-    }
-    lastTx = _lastTx
-    // We need to trigger full refresh on queries, etc.
-    await oldOnConnect?.(ClientConnectEvent.Refresh, lastTx, data)
-  }
 
   return client
 }
@@ -362,9 +430,13 @@ async function loadModel (
     hash: ''
   }
 
-  if (conn.getLastHash !== undefined && (await conn.getLastHash(ctx)) === current.hash) {
-    // We have same model hash.
-    return { mode: 'same', current: current.transactions, addition: [] }
+  if (conn.getLastHash !== undefined) {
+    const account = await conn.getAccount()
+    const lastHash = await conn.getLastHash(ctx)
+    if (lastHash[account.targetWorkspace] === current.hash) {
+      // We have same model hash.
+      return { mode: 'same', current: current.transactions, addition: [] }
+    }
   }
   const lastTxTime = getLastTxTime(current.transactions)
   const result = await ctx.with('connection-load-model', { hash: current.hash !== '' }, (ctx) =>

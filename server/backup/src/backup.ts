@@ -40,7 +40,7 @@ import core, {
   type WorkspaceIds,
   type WorkspaceUuid
 } from '@hcengineering/core'
-import { BlobClient, createClient, getTransactorEndpoint } from '@hcengineering/server-client'
+import { BlobClient, createClient } from '@hcengineering/server-client'
 import { estimateDocSize, type StorageAdapter } from '@hcengineering/server-core'
 import { generateToken } from '@hcengineering/server-token'
 import { deepEqual } from 'fast-equals'
@@ -1828,7 +1828,7 @@ export async function restore (
     recheck?: boolean
     include?: Set<string>
     skip?: Set<string>
-    getConnection?: () => Promise<CoreClient & BackupClient>
+    getConnection: () => Promise<CoreClient & BackupClient>
     storageAdapter?: StorageAdapter
     token?: string
     progress?: (progress: number) => Promise<void>
@@ -1878,26 +1878,10 @@ export async function restore (
     opt.token ??
     generateToken(systemAccountUuid, workspaceId, {
       service: 'backup',
-      mode: 'backup',
-      model: 'upgrade'
+      mode: 'backup'
     })
 
-  const connection =
-    opt.getConnection !== undefined
-      ? await opt.getConnection()
-      : ((await createClient(transactorUrl, token)) as CoreClient & BackupClient)
-
-  if (opt.getConnection === undefined) {
-    try {
-      let serverEndpoint = await getTransactorEndpoint(token, 'external')
-      serverEndpoint = serverEndpoint.replaceAll('wss://', 'https://').replace('ws://', 'http://')
-      await fetch(serverEndpoint + `/api/v1/manage?token=${token}&operation=force-close`, {
-        method: 'PUT'
-      })
-    } catch (err: any) {
-      // Ignore
-    }
-  }
+  const connection = await opt.getConnection()
 
   const blobClient = new BlobClient(transactorUrl, token, wsIds, { storageAdapter: opt.storageAdapter })
   console.log('connected')

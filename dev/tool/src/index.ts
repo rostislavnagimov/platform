@@ -36,6 +36,7 @@ import {
 } from '@hcengineering/server-backup'
 import serverClientPlugin, { getAccountClient } from '@hcengineering/server-client'
 import {
+  createBackupPipeline,
   registerAdapterFactory,
   registerDestroyFactory,
   registerServerPlugins,
@@ -84,8 +85,12 @@ import {
   shutdownPostgres
 } from '@hcengineering/postgres'
 import {
+  createDummyStorageAdapter,
   QueueTopic,
   workspaceEvents,
+  wrapPipeline,
+  type Pipeline,
+  type PipelineFactory,
   type QueueWorkspaceMessage,
   type StorageAdapter
 } from '@hcengineering/server-core'
@@ -1155,6 +1160,16 @@ export function devTool (
 
           const workspaceStorage: StorageAdapter | undefined =
             storageConfig !== undefined ? buildStorageFromConfig(storageConfig) : undefined
+
+          const { dbUrl, txes } = prepareTools()
+
+          const pipelineFactory: PipelineFactory = createBackupPipeline(toolCtx, dbUrl, txes, {
+            externalStorage: workspaceStorage ?? createDummyStorageAdapter(),
+            usePassedCtx: true
+          })
+
+          let pipeline: Pipeline | undefined
+
           await restore(toolCtx, await getWorkspaceTransactorEndpoint(workspace), wsIds, storage, {
             date: parseInt(date ?? '-1'),
             merge: cmd.merge,
@@ -1163,7 +1178,13 @@ export function devTool (
             include: cmd.include === '*' ? undefined : new Set(cmd.include.split(';')),
             skip: new Set(cmd.skip.split(';')),
             storageAdapter: workspaceStorage,
-            historyFile: cmd.historyFile
+            historyFile: cmd.historyFile,
+            getConnection: async () => {
+              if (pipeline === undefined) {
+                pipeline = await pipelineFactory(toolCtx, wsIds, () => {}, null, null)
+              }
+              return wrapPipeline(toolCtx, pipeline, wsIds)
+            }
           })
           const queue = getPlatformQueue('tool', ws.region)
           const wsProducer = queue.getProducer<QueueWorkspaceMessage>(toolCtx, QueueTopic.Workspace)

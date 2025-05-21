@@ -48,6 +48,8 @@ export class LiveQueryMiddleware extends BaseMiddleware implements Middleware {
       getModel (): ModelDb {
         return modelDb
       },
+      getAvailableWorkspaces: () => [],
+      getWorkspaces: () => ({}),
       close: () => Promise.resolve(),
       findAll: async (_class, query, options) => {
         const _ctx: MeasureContext = (options as ServerFindOptions<Doc>)?.ctx ?? metrics

@@ -32,6 +32,8 @@ import {
 import {
   AccountUuid,
   generateId,
+  groupByArray,
+  toFindResult,
   TxProcessor,
   type Account,
   type Class,
@@ -61,14 +63,15 @@ import {
   BackupClientOps,
   createBroadcastEvent,
   SessionDataImpl,
-  type ClientSessionCtx,
   type ConnectionSocket,
   type Pipeline,
-  type Session,
   type SessionRequest,
   type StatisticsElement
 } from '@hcengineering/server-core'
+
 import { type Token } from '@hcengineering/server-token'
+import { mapLookup } from './lookup'
+import { type ClientSessionCtx, type Session } from './types'
 
 const useReserveContext = (process.env.USE_RESERVE_CTX ?? 'true') === 'true'
 
@@ -93,10 +96,13 @@ export class ClientSession implements Session {
   ops: BackupClientOps | undefined
   opsPipeline: Pipeline | undefined
   isAdmin: boolean
+  workspaceClosed = false
 
   constructor (
+    readonly ctx: MeasureContext,
     protected readonly token: Token,
-    readonly workspace: WorkspaceIds,
+    readonly socket: ConnectionSocket,
+    readonly workspaces: { wsIds: WorkspaceIds, enabled: boolean }[],
     readonly account: Account,
     readonly info: LoginInfoWithWorkspaces,
     readonly allowUpload: boolean
@@ -106,6 +112,10 @@ export class ClientSession implements Session {
 
   getUser (): AccountUuid {
     return this.token.account
+  }
+
+  async getAccount (ctx: ClientSessionCtx): Promise<void> {
+    await ctx.sendResponse(ctx.requestId, this.account)
   }
 
   getUserSocialIds (): PersonId[] {
@@ -134,42 +144,50 @@ export class ClientSession implements Session {
   }
 
   async loadModel (ctx: ClientSessionCtx, lastModelTx: Timestamp, hash?: string): Promise<void> {
-    try {
-      this.includeSessionContext(ctx)
-      const result = await ctx.ctx.with('load-model', {}, () => ctx.pipeline.loadModel(ctx.ctx, lastModelTx, hash))
-      await ctx.sendResponse(ctx.requestId, result)
-    } catch (err) {
-      await ctx.sendError(ctx.requestId, 'Failed to loadModel', unknownError(err))
-      ctx.ctx.error('failed to loadModel', { err })
-    }
+    // TODO: Model is from first workspace for now.
+    const workspace = ctx.workspaces[0]
+    await workspace.with(async (pipeline, communicationApi) => {
+      try {
+        this.includeSessionContext(ctx, pipeline)
+        const result = await ctx.ctx.with('load-model', {}, () => pipeline.loadModel(ctx.ctx, lastModelTx, hash))
+        await ctx.sendResponse(ctx.requestId, result)
+      } catch (err) {
+        await ctx.sendError(ctx.requestId, 'Failed to loadModel', unknownError(err))
+        ctx.ctx.error('failed to loadModel', { err })
+      }
+    })
   }
 
   async loadModelRaw (ctx: ClientSessionCtx, lastModelTx: Timestamp, hash?: string): Promise<LoadModelResponse | Tx[]> {
-    this.includeSessionContext(ctx)
-    return await ctx.ctx.with('load-model', {}, (_ctx) => ctx.pipeline.loadModel(_ctx, lastModelTx, hash))
+    // TODO: Model is from first workspace for now.
+    const workspace = ctx.workspaces[0]
+    return await workspace.with(async (pipeline, communicationApi) => {
+      this.includeSessionContext(ctx, pipeline)
+      return await ctx.ctx.with('load-model', {}, (_ctx) => pipeline.loadModel(_ctx, lastModelTx, hash))
+    })
   }
 
-  includeSessionContext (ctx: ClientSessionCtx): void {
-    const dataId = this.workspace.dataId ?? (this.workspace.uuid as unknown as WorkspaceDataId)
+  includeSessionContext (ctx: ClientSessionCtx, pipeline: Pipeline): void {
+    const dataId = pipeline.context.workspace.dataId ?? (pipeline.context.workspace.uuid as unknown as WorkspaceDataId)
     const contextData = new SessionDataImpl(
       this.account,
       this.sessionId,
       this.isAdmin,
       undefined,
       {
-        ...this.workspace,
+        ...pipeline.context.workspace,
         dataId
       },
       false,
       undefined,
       undefined,
-      ctx.pipeline.context.modelDb,
+      pipeline.context.modelDb,
       ctx.socialStringsToUsers
     )
     ctx.ctx.contextData = contextData
   }
 
-  findAllRaw<T extends Doc>(
+  async findAllRaw<T extends Doc>(
     ctx: ClientSessionCtx,
     _class: Ref<Class<T>>,
     query: DocumentQuery<T>,
@@ -178,8 +196,37 @@ export class ClientSession implements Session {
     this.lastRequest = Date.now()
     this.total.find++
     this.current.find++
-    this.includeSessionContext(ctx)
-    return ctx.pipeline.findAll(ctx.ctx, _class, query, options)
+
+    const result: FindResult<T> = toFindResult([], -1)
+
+    let workspaces = ctx.workspaces
+
+    if (options?.workspace !== undefined) {
+      if (typeof options.workspace === 'string') {
+        workspaces = workspaces.filter((it) => it.wsId.uuid === options.workspace)
+      } else if ('$in' in options.workspace && options.workspace.$in !== undefined) {
+        const $in = options.workspace.$in
+        workspaces = workspaces.filter((it) => $in.includes(it.wsId.uuid))
+      } else if ('$nin' in options.workspace && options.workspace.$nin !== undefined) {
+        const $nin = options.workspace.$nin
+        workspaces = workspaces.filter((it) => !$nin.includes(it.wsId.uuid))
+      }
+    }
+
+    for (const workspace of workspaces) {
+      await workspace.with(async (pipeline, communicationApi) => {
+        this.includeSessionContext(ctx, pipeline)
+        const part = await pipeline.findAll(ctx.ctx, _class, query, options)
+        result.push(...part)
+        if (part.total !== -1) {
+          if (result.total === -1) {
+            result.total = 0
+          }
+          result.total += part.total
+        }
+      })
+    }
+    return result
   }
 
   async findAll<T extends Doc>(
@@ -189,7 +236,8 @@ export class ClientSession implements Session {
     options?: FindOptions<T>
   ): Promise<void> {
     try {
-      await ctx.sendResponse(ctx.requestId, await this.findAllRaw(ctx, _class, query, options))
+      const result = await this.findAllRaw(ctx, _class, query, options)
+      await ctx.sendResponse(ctx.requestId, mapLookup<T>(query, result, options))
     } catch (err) {
       await ctx.sendError(ctx.requestId, 'Failed to findAll', unknownError(err))
       ctx.ctx.error('failed to findAll', { err })
@@ -199,8 +247,11 @@ export class ClientSession implements Session {
   async searchFulltext (ctx: ClientSessionCtx, query: SearchQuery, options: SearchOptions): Promise<void> {
     try {
       this.lastRequest = Date.now()
-      this.includeSessionContext(ctx)
-      await ctx.sendResponse(ctx.requestId, await ctx.pipeline.searchFulltext(ctx.ctx, query, options))
+      const workspace = ctx.workspaces[0]
+      await workspace.with(async (pipeline, communicationApi) => {
+        this.includeSessionContext(ctx, pipeline)
+        await ctx.sendResponse(ctx.requestId, await pipeline.searchFulltext(ctx.ctx, query, options))
+      })
     } catch (err) {
       await ctx.sendError(ctx.requestId, 'Failed to searchFulltext', unknownError(err))
       ctx.ctx.error('failed to searchFulltext', { err })
@@ -209,8 +260,11 @@ export class ClientSession implements Session {
 
   async searchFulltextRaw (ctx: ClientSessionCtx, query: SearchQuery, options: SearchOptions): Promise<SearchResult> {
     this.lastRequest = Date.now()
-    this.includeSessionContext(ctx)
-    return await ctx.pipeline.searchFulltext(ctx.ctx, query, options)
+    const workspace = ctx.workspaces[0]
+    return await workspace.with(async (pipeline, communicationApi) => {
+      this.includeSessionContext(ctx, pipeline)
+      return await pipeline.searchFulltext(ctx.ctx, query, options)
+    })
   }
 
   async txRaw (
@@ -224,43 +278,49 @@ export class ClientSession implements Session {
     this.lastRequest = Date.now()
     this.total.tx++
     this.current.tx++
-    this.includeSessionContext(ctx)
-
-    let cid = 'client_' + generateId()
-    ctx.ctx.id = cid
-    let onEnd = useReserveContext ? ctx.pipeline.context.adapterManager?.reserveContext?.(cid) : undefined
-    let result: TxResult
-    try {
-      result = await ctx.pipeline.tx(ctx.ctx, [tx])
-    } finally {
-      onEnd?.()
+    const workspace = ctx.workspaces.find((it) => it.wsId.uuid === tx._uuid)
+    if (workspace === undefined) {
+      throw new Error('Workspace not found')
     }
-    // Send result immideately
-    await ctx.sendResponse(ctx.requestId, result)
+    return await workspace.with(async (pipeline, communicationApi) => {
+      this.includeSessionContext(ctx, pipeline)
 
-    // We need to broadcast all collected transactions
-    const broadcastPromise = ctx.pipeline.handleBroadcast(ctx.ctx)
-
-    // ok we could perform async requests if any
-    const asyncs = (ctx.ctx.contextData as SessionData).asyncRequests ?? []
-    let asyncsPromise: Promise<void> | undefined
-    if (asyncs.length > 0) {
-      cid = 'client_async_' + generateId()
+      let cid = 'client_' + generateId()
       ctx.ctx.id = cid
-      onEnd = useReserveContext ? ctx.pipeline.context.adapterManager?.reserveContext?.(cid) : undefined
-      const handleAyncs = async (): Promise<void> => {
-        try {
-          for (const r of (ctx.ctx.contextData as SessionData).asyncRequests ?? []) {
-            await r()
-          }
-        } finally {
-          onEnd?.()
-        }
+      let onEnd = useReserveContext ? pipeline.context.adapterManager?.reserveContext?.(cid) : undefined
+      let result: TxResult
+      try {
+        result = await pipeline.tx(ctx.ctx, [tx])
+      } finally {
+        onEnd?.()
       }
-      asyncsPromise = handleAyncs()
-    }
+      // Send result immideately
+      await ctx.sendResponse(ctx.requestId, result)
 
-    return { result, broadcastPromise, asyncsPromise }
+      // We need to broadcast all collected transactions
+      const broadcastPromise = pipeline.handleBroadcast(ctx.ctx)
+
+      // ok we could perform async requests if any
+      const asyncs = (ctx.ctx.contextData as SessionData).asyncRequests ?? []
+      let asyncsPromise: Promise<void> | undefined
+      if (asyncs.length > 0) {
+        cid = 'client_async_' + generateId()
+        ctx.ctx.id = cid
+        onEnd = useReserveContext ? pipeline.context.adapterManager?.reserveContext?.(cid) : undefined
+        const handleAyncs = async (): Promise<void> => {
+          try {
+            for (const r of (ctx.ctx.contextData as SessionData).asyncRequests ?? []) {
+              await r()
+            }
+          } finally {
+            onEnd?.()
+          }
+        }
+        asyncsPromise = handleAyncs()
+      }
+
+      return { result, broadcastPromise, asyncsPromise }
+    })
   }
 
   async tx (ctx: ClientSessionCtx, tx: Tx): Promise<void> {
@@ -278,25 +338,28 @@ export class ClientSession implements Session {
 
   broadcast (ctx: MeasureContext, socket: ConnectionSocket, tx: Tx[]): void {
     if (this.tx.length > 10000) {
-      const classes = new Set<Ref<Class<Doc>>>()
-      for (const dtx of tx) {
-        if (TxProcessor.isExtendsCUD(dtx._class)) {
-          classes.add((dtx as TxCUD<Doc>).objectClass)
-          const attachedToClass = (dtx as TxCUD<Doc>).attachedToClass
-          if (attachedToClass !== undefined) {
-            classes.add(attachedToClass)
+      const byWorkspace = groupByArray(tx, (it) => it._uuid)
+      for (const [uuid, tx] of byWorkspace) {
+        const classes = new Set<Ref<Class<Doc>>>()
+        for (const dtx of tx) {
+          if (TxProcessor.isExtendsCUD(dtx._class)) {
+            classes.add((dtx as TxCUD<Doc>).objectClass)
+            const attachedToClass = (dtx as TxCUD<Doc>).attachedToClass
+            if (attachedToClass !== undefined) {
+              classes.add(attachedToClass)
+            }
           }
         }
+        const bevent = createBroadcastEvent(uuid, Array.from(classes))
+        void socket.send(
+          ctx,
+          {
+            result: [bevent]
+          },
+          this.binaryMode,
+          this.useCompression
+        )
       }
-      const bevent = createBroadcastEvent(Array.from(classes))
-      void socket.send(
-        ctx,
-        {
-          result: [bevent]
-        },
-        this.binaryMode,
-        this.useCompression
-      )
     } else {
       void socket.send(ctx, { result: tx }, this.binaryMode, this.useCompression)
     }
@@ -316,8 +379,11 @@ export class ClientSession implements Session {
   async loadChunk (ctx: ClientSessionCtx, domain: Domain, idx?: number): Promise<void> {
     this.lastRequest = Date.now()
     try {
-      const result = await this.getOps(ctx.pipeline).loadChunk(ctx.ctx, domain, idx)
-      await ctx.sendResponse(ctx.requestId, result)
+      const workspace = ctx.workspaces[0]
+      await workspace.with(async (pipeline, communicationApi) => {
+        const result = await this.getOps(pipeline).loadChunk(ctx.ctx, domain, idx)
+        await ctx.sendResponse(ctx.requestId, result)
+      })
     } catch (err: any) {
       await ctx.sendError(ctx.requestId, 'Failed to upload', unknownError(err))
       ctx.ctx.error('failed to loadChunk', { domain, err })
@@ -327,8 +393,11 @@ export class ClientSession implements Session {
   async getDomainHash (ctx: ClientSessionCtx, domain: Domain): Promise<void> {
     this.lastRequest = Date.now()
     try {
-      const result = await this.getOps(ctx.pipeline).getDomainHash(ctx.ctx, domain)
-      await ctx.sendResponse(ctx.requestId, result)
+      const workspace = ctx.workspaces[0]
+      await workspace.with(async (pipeline, communicationApi) => {
+        const result = await this.getOps(pipeline).getDomainHash(ctx.ctx, domain)
+        await ctx.sendResponse(ctx.requestId, result)
+      })
     } catch (err: any) {
       await ctx.sendError(ctx.requestId, 'Failed to upload', unknownError(err))
       ctx.ctx.error('failed to getDomainHash', { domain, err })
@@ -338,8 +407,11 @@ export class ClientSession implements Session {
   async closeChunk (ctx: ClientSessionCtx, idx: number): Promise<void> {
     try {
       this.lastRequest = Date.now()
-      await this.getOps(ctx.pipeline).closeChunk(ctx.ctx, idx)
-      await ctx.sendResponse(ctx.requestId, {})
+      const workspace = ctx.workspaces[0]
+      await workspace.with(async (pipeline, communicationApi) => {
+        await this.getOps(pipeline).closeChunk(ctx.ctx, idx)
+        await ctx.sendResponse(ctx.requestId, {})
+      })
     } catch (err: any) {
       await ctx.sendError(ctx.requestId, 'Failed to closeChunk', unknownError(err))
       ctx.ctx.error('failed to closeChunk', { err })
@@ -349,8 +421,11 @@ export class ClientSession implements Session {
   async loadDocs (ctx: ClientSessionCtx, domain: Domain, docs: Ref<Doc>[]): Promise<void> {
     this.lastRequest = Date.now()
     try {
-      const result = await this.getOps(ctx.pipeline).loadDocs(ctx.ctx, domain, docs)
-      await ctx.sendResponse(ctx.requestId, result)
+      const workspace = ctx.workspaces[0]
+      await workspace.with(async (pipeline, communicationApi) => {
+        const result = await this.getOps(pipeline).loadDocs(ctx.ctx, domain, docs)
+        await ctx.sendResponse(ctx.requestId, result)
+      })
     } catch (err: any) {
       await ctx.sendError(ctx.requestId, 'Failed to loadDocs', unknownError(err))
       ctx.ctx.error('failed to loadDocs', { domain, err })
@@ -363,7 +438,10 @@ export class ClientSession implements Session {
     }
     this.lastRequest = Date.now()
     try {
-      await this.getOps(ctx.pipeline).upload(ctx.ctx, domain, docs)
+      const workspace = ctx.workspaces[0]
+      await workspace.with(async (pipeline, communicationApi) => {
+        await this.getOps(pipeline).upload(ctx.ctx, domain, docs)
+      })
     } catch (err: any) {
       await ctx.sendError(ctx.requestId, 'Failed to upload', unknownError(err))
       ctx.ctx.error('failed to loadDocs', { domain, err })
@@ -378,7 +456,10 @@ export class ClientSession implements Session {
     }
     this.lastRequest = Date.now()
     try {
-      await this.getOps(ctx.pipeline).clean(ctx.ctx, domain, docs)
+      const workspace = ctx.workspaces[0]
+      await workspace.with(async (pipeline, communicationApi) => {
+        await this.getOps(pipeline).clean(ctx.ctx, domain, docs)
+      })
     } catch (err: any) {
       await ctx.sendError(ctx.requestId, 'Failed to clean', unknownError(err))
       ctx.ctx.error('failed to clean', { domain, err })
@@ -389,7 +470,10 @@ export class ClientSession implements Session {
 
   async eventRaw (ctx: ClientSessionCtx, event: CommunicationEvent): Promise<EventResult> {
     this.lastRequest = Date.now()
-    return await ctx.communicationApi.event(this.getCommunicationCtx(), event)
+    const workspace = ctx.workspaces[0]
+    return await workspace.with(async (pipeline, communicationApi) => {
+      return await communicationApi.event(this.getCommunicationCtx(workspace.wsId), event)
+    })
   }
 
   async event (ctx: ClientSessionCtx, event: CommunicationEvent): Promise<void> {
@@ -399,7 +483,10 @@ export class ClientSession implements Session {
 
   async findMessagesRaw (ctx: ClientSessionCtx, params: FindMessagesParams, queryId?: number): Promise<Message[]> {
     this.lastRequest = Date.now()
-    return await ctx.communicationApi.findMessages(this.getCommunicationCtx(), params, queryId)
+    const workspace = ctx.workspaces[0]
+    return await workspace.with(async (pipeline, communicationApi) => {
+      return await communicationApi.findMessages(this.getCommunicationCtx(workspace.wsId), params, queryId)
+    })
   }
 
   async findMessages (ctx: ClientSessionCtx, params: FindMessagesParams, queryId?: number): Promise<void> {
@@ -409,7 +496,10 @@ export class ClientSession implements Session {
 
   async findMessagesGroupsRaw (ctx: ClientSessionCtx, params: FindMessagesGroupsParams): Promise<MessagesGroup[]> {
     this.lastRequest = Date.now()
-    return await ctx.communicationApi.findMessagesGroups(this.getCommunicationCtx(), params)
+    const workspace = ctx.workspaces[0]
+    return await workspace.with(async (pipeline, communicationApi) => {
+      return await communicationApi.findMessagesGroups(this.getCommunicationCtx(workspace.wsId), params)
+    })
   }
 
   async findMessagesGroups (ctx: ClientSessionCtx, params: FindMessagesGroupsParams): Promise<void> {
@@ -418,8 +508,11 @@ export class ClientSession implements Session {
   }
 
   async findNotifications (ctx: ClientSessionCtx, params: FindNotificationsParams): Promise<void> {
-    const result = await ctx.communicationApi.findNotifications(this.getCommunicationCtx(), params)
-    await ctx.sendResponse(ctx.requestId, result)
+    const workspace = ctx.workspaces[0]
+    await workspace.with(async (pipeline, communicationApi) => {
+      const result = await communicationApi.findNotifications(this.getCommunicationCtx(workspace.wsId), params)
+      await ctx.sendResponse(ctx.requestId, result)
+    })
   }
 
   async findNotificationContexts (
@@ -427,30 +520,51 @@ export class ClientSession implements Session {
     params: FindNotificationContextParams,
     queryId?: number
   ): Promise<void> {
-    const result = await ctx.communicationApi.findNotificationContexts(this.getCommunicationCtx(), params, queryId)
-    await ctx.sendResponse(ctx.requestId, result)
+    const workspace = ctx.workspaces[0]
+    await workspace.with(async (pipeline, communicationApi) => {
+      const result = await communicationApi.findNotificationContexts(
+        this.getCommunicationCtx(workspace.wsId),
+        params,
+        queryId
+      )
+      await ctx.sendResponse(ctx.requestId, result)
+    })
   }
 
   async findLabels (ctx: ClientSessionCtx, params: FindLabelsParams): Promise<void> {
-    const result = await ctx.communicationApi.findLabels(this.getCommunicationCtx(), params)
-    await ctx.sendResponse(ctx.requestId, result)
+    const workspace = ctx.workspaces[0]
+    await workspace.with(async (pipeline, communicationApi) => {
+      const result = await communicationApi.findLabels(this.getCommunicationCtx(workspace.wsId), params)
+      await ctx.sendResponse(ctx.requestId, result)
+    })
   }
 
   async findCollaborators (ctx: ClientSessionCtx, params: FindCollaboratorsParams): Promise<void> {
-    const result = await ctx.communicationApi.findCollaborators(this.getCommunicationCtx(), params)
-    await ctx.sendResponse(ctx.requestId, result)
+    const workspace = ctx.workspaces[0]
+    await workspace.with(async (pipeline, communicationApi) => {
+      const result = await communicationApi.findCollaborators(this.getCommunicationCtx(workspace.wsId), params)
+      await ctx.sendResponse(ctx.requestId, result)
+    })
   }
 
   async unsubscribeQuery (ctx: ClientSessionCtx, id: number): Promise<void> {
     this.lastRequest = Date.now()
-    await ctx.communicationApi.unsubscribeQuery(this.getCommunicationCtx(), id)
-    await ctx.sendResponse(ctx.requestId, {})
+    const workspace = ctx.workspaces[0]
+    await workspace.with(async (pipeline, communicationApi) => {
+      await communicationApi.unsubscribeQuery(this.getCommunicationCtx(workspace.wsId), id)
+      await ctx.sendResponse(ctx.requestId, {})
+    })
   }
 
-  private getCommunicationCtx (): CommunicationSession {
+  private getCommunicationCtx (workspaceId: WorkspaceIds): CommunicationSession {
     return {
       sessionId: this.sessionId,
-      account: this.account
+      account: {
+        ...this.account,
+        // TODO: Fix me, Undetermined role is missing in communication API
+        role: this.account.workspaces[workspaceId.uuid].role ?? this.account.role,
+        fullSocialIds: Array.from(this.account.fullSocialIds.values()) // TODO: Fix me, fix types in communication API
+      }
     }
   }
 }

@@ -1,23 +1,20 @@
-import { getClient as getAccountClient } from '@hcengineering/account-client'
 import { Analytics } from '@hcengineering/analytics'
 import client from '@hcengineering/client'
 import { ensureEmployee, setCurrentEmployee } from '@hcengineering/contact'
 import core, {
   ClientConnectEvent,
   concatLink,
-  isWorkspaceCreating,
   metricsToString,
-  pickPrimarySocialId,
   setCurrentAccount,
   versionToString,
   type Account,
   type Client,
   type Person as GlobalPerson,
   type MeasureMetricsContext,
-  type SocialId,
-  type Version
+  type Version,
+  type WorkspaceUuid
 } from '@hcengineering/core'
-import login, { loginId, type Pages } from '@hcengineering/login'
+import login, { loginId } from '@hcengineering/login'
 import { broadcastEvent, getMetadata, getResource, OK, setMetadata, translateCB } from '@hcengineering/platform'
 import presentation, {
   loadServerConfig,
@@ -26,6 +23,8 @@ import presentation, {
   setClient,
   setCommunicationClient,
   setPresentationCookie,
+  setSingleWorkspace,
+  setTargetWorkspace,
   uiContext,
   upgradeDownloadProgress
 } from '@hcengineering/presentation'
@@ -40,7 +39,7 @@ import {
 import { get, writable } from 'svelte/store'
 
 import plugin from './plugin'
-import { logOut, workspaceCreating } from './utils'
+import { logOut } from './utils'
 
 export const versionError = writable<string | undefined>(undefined)
 const versionStorageKey = 'last_server_version'
@@ -57,11 +56,11 @@ export async function disconnect (): Promise<void> {
   }
 }
 
-export async function connect (title: string): Promise<Client | undefined> {
+export async function connect (title: string, singleWorkspace: boolean = true): Promise<Client | undefined> {
   const ctx = uiContext.newChild('connect', {})
   const loc = getCurrentLocation()
   const wsUrl = loc.path[1]
-  if (wsUrl === undefined) {
+  if (singleWorkspace && wsUrl === undefined) {
     const lastLoc = localStorage.getItem(locationStorageKeyId)
     if (lastLoc !== null) {
       const lastLocObj = JSON.parse(lastLoc)
@@ -78,7 +77,11 @@ export async function connect (title: string): Promise<Client | undefined> {
   }
 
   const selectWorkspace = await getResource(login.function.SelectWorkspace)
-  const [, workspaceLoginInfo] = await ctx.with('select-workspace', {}, async () => await selectWorkspace(wsUrl, null))
+  const [, workspaceLoginInfo] = await ctx.with(
+    'select-workspace',
+    {},
+    async () => await selectWorkspace(wsUrl, null, singleWorkspace)
+  )
 
   if (workspaceLoginInfo == null) {
     console.error(
@@ -93,55 +96,21 @@ export async function connect (title: string): Promise<Client | undefined> {
   const token = workspaceLoginInfo.token
 
   setMetadata(presentation.metadata.Token, workspaceLoginInfo.token)
-  setMetadata(presentation.metadata.WorkspaceUuid, workspaceLoginInfo.workspace)
-  setMetadata(presentation.metadata.WorkspaceDataId, workspaceLoginInfo.workspaceDataId)
+
   setMetadata(presentation.metadata.Endpoint, workspaceLoginInfo.endpoint)
 
-  const fetchWorkspace = await getResource(login.function.FetchWorkspace)
-  let workspace = await ctx.with('fetch-workspace', {}, async () => (await fetchWorkspace())[1])
+  setMetadata(presentation.metadata.PersonalWorkspaceUuid, workspaceLoginInfo.personalWorkspace)
 
-  if (workspace == null) {
-    // something went wrong, workspace not exist, redirect to login
-    console.error(
-      `Error fetching workspace ${wsUrl}. It might no longer exist or be inaccessible. Please try to log in again.`
-    )
-    navigate({
-      path: [loginId]
-    })
-    return
-  }
-
-  if (isWorkspaceCreating(workspace.mode)) {
-    while (true) {
-      if (wsUrl !== getCurrentLocation().path[1]) return
-
-      workspaceCreating.set(workspace.processingProgress ?? 0)
-      workspace = await ctx.with('fetch-workspace', {}, async () => (await fetchWorkspace())[1])
-
-      if (workspace == null) {
-        // something went wrong, workspace not exist, redirect to login
-        navigate({
-          path: [loginId]
-        })
-        return
-      }
-
-      workspaceCreating.set(workspace.processingProgress ?? 0)
-
-      if (!isWorkspaceCreating(workspace.mode)) {
-        workspaceCreating.set(-1)
-        break
-      }
-
-      await new Promise<void>((resolve) => setTimeout(resolve, 1000))
-    }
-  }
+  // Set for target workspace for now
+  setMetadata(presentation.metadata.WorkspaceUuid, workspaceLoginInfo.workspace)
+  setMetadata(presentation.metadata.WorkspaceDataId, workspaceLoginInfo.workspaceDataId)
+  setMetadata(presentation.metadata.PersonalWorkspaceUuid, core.workspace.Personal) // No personal workspace set in single workspace mode
 
   setPresentationCookie(token, workspaceLoginInfo.workspace)
   setMetadataLocalStorage(login.metadata.LoginEndpoint, workspaceLoginInfo?.endpoint)
 
   const endpoint = getMetadata(login.metadata.TransactorOverride) ?? workspaceLoginInfo?.endpoint
-  const account = workspaceLoginInfo?.account
+  const account = workspaceLoginInfo.account
   if (token == null || endpoint == null || account == null) {
     console.error('Something of the vital auth info is missing. Please try to log in again.')
     const navigateUrl = encodeURIComponent(JSON.stringify(loc))
@@ -172,11 +141,15 @@ export async function connect (title: string): Promise<Client | undefined> {
 
   const clientFactory = await getResource(client.function.GetClient)
   let version: Version | undefined
+  let accountRef: Account | undefined
   const newClient = await ctx.with(
     'create-client',
     {},
     async (ctx) =>
       await clientFactory(token, endpoint, {
+        onAccount: (a) => {
+          accountRef = a
+        },
         onHello: (serverVersion?: string) => {
           const frontVersion = getMetadata(presentation.metadata.FrontVersion)
           if (
@@ -216,33 +189,12 @@ export async function connect (title: string): Promise<Client | undefined> {
 
           return true
         },
-        onUpgrade: () => {
-          location.reload()
-        },
         onUnauthorized: () => {
           void logOut().then(() => {
             navigate({
               path: [loginId],
               query: {}
             })
-          })
-        },
-        onArchived: () => {
-          translateCB(plugin.string.WorkspaceIsArchived, {}, get(themeStore).language, (r) => {
-            const selectWorkspace: Pages = 'selectWorkspace'
-            navigate({
-              path: [loginId, selectWorkspace],
-              query: {}
-            })
-          })
-        },
-        onMigration: () => {
-          // TODO: Rework maitenance mode as well
-          translateCB(plugin.string.WorkspaceIsMigrating, {}, get(themeStore).language, (r) => {
-            versionError.set(r)
-            setTimeout(() => {
-              location.reload()
-            }, 5000)
           })
         },
         // We need to refresh all active live queries and clear old queries.
@@ -328,7 +280,7 @@ export async function connect (title: string): Promise<Client | undefined> {
           const newLoginInfo = await ctx.with(
             'select-workspace',
             {},
-            async () => (await selectWorkspace(wsUrl, token))[1]
+            async () => (await selectWorkspace(wsUrl, token, singleWorkspace))[1]
           )
           if (newLoginInfo?.endpoint !== endpoint) {
             console.log('endpoint changed, reloading')
@@ -338,23 +290,41 @@ export async function connect (title: string): Promise<Client | undefined> {
       })
   )
 
-  _client = newClient
-
-  // TODO: should we take the function from some resource like fetchWorkspace/selectWorkspace
-  // to remove account client dependency?
-  const accountsUrl = getMetadata(login.metadata.AccountsUrl)
-  const socialIds: SocialId[] = await getAccountClient(accountsUrl, token).getSocialIds()
-
-  const me: Account = {
-    uuid: account,
-    role: workspaceLoginInfo.role,
-    primarySocialId: pickPrimarySocialId(socialIds)._id,
-    socialIds: socialIds.map((si) => si._id),
-    fullSocialIds: socialIds
+  if (accountRef == null) {
+    accountRef = await newClient.getConnection?.()?.getAccount()
+  }
+  if (accountRef == null) {
+    throw new Error('Failed to get account')
   }
 
+  _client = newClient
+
   // Ensure employee and social identifiers
-  const employee = await ensureEmployee(ctx, me, newClient, socialIds, getGlobalPerson)
+  const employee = await ensureEmployee(
+    ctx,
+    accountRef,
+    newClient,
+    workspaceLoginInfo.workspace,
+    Array.from(accountRef.fullSocialIds.values()),
+    getGlobalPerson
+  )
+
+  if (!singleWorkspace) {
+    // We need to be sure all other employee instances are created.
+    for (const [ws, info] of Object.entries(accountRef.workspaces)) {
+      if (ws === workspaceLoginInfo.workspace || info.maintenance || !info.enabled) {
+        continue
+      }
+      await ensureEmployee(
+        ctx,
+        accountRef,
+        newClient,
+        ws as WorkspaceUuid,
+        Array.from(accountRef.fullSocialIds.values()),
+        getGlobalPerson
+      )
+    }
+  }
 
   if (employee == null) {
     console.log('Failed to ensure employee')
@@ -367,9 +337,12 @@ export async function connect (title: string): Promise<Client | undefined> {
 
   Analytics.setUser(account)
   Analytics.setTag('workspace', wsUrl)
-  console.log('Logged in with account: ', me)
-  setCurrentAccount(me)
+  console.log('Logged in with account: ', accountRef)
+  setCurrentAccount(accountRef)
   setCurrentEmployee(employee)
+  if (workspaceLoginInfo.workspace !== undefined) {
+    setTargetWorkspace(workspaceLoginInfo.workspace)
+  }
 
   try {
     version = await ctx.with(
@@ -406,11 +379,13 @@ export async function connect (title: string): Promise<Client | undefined> {
   document.title = [wsUrl, title].filter((it) => it).join(' - ')
   _clientSet = true
   await ctx.with('set-client', {}, async () => {
+    setSingleWorkspace(singleWorkspace)
     await setClient(newClient)
+
     await setCommunicationClient(newClient)
   })
   await ctx.with('broadcast-connected', {}, async () => {
-    await broadcastEvent(plugin.event.NotifyConnection, me)
+    await broadcastEvent(plugin.event.NotifyConnection, accountRef)
   })
   console.log(metricsToString((ctx as MeasureMetricsContext).metrics, 'connect', 50))
   return newClient

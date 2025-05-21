@@ -1155,6 +1155,7 @@ export class PullRequestSyncManager extends IssueSyncManagerBase implements DocS
 
     return {
       ...value,
+      _uuid: info._uuid,
       _id: prId,
       _class: github.class.GithubPullRequest,
       space: info.space as any,

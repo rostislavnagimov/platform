@@ -2,7 +2,6 @@ import { AccountClient } from '@hcengineering/account-client'
 import { Analytics } from '@hcengineering/analytics'
 import core, {
   Class,
-  Client,
   DOMAIN_MIGRATION,
   DOMAIN_TX,
   Data,
@@ -123,7 +122,7 @@ export interface MigrationClient {
 /**
  * @public
  */
-export type MigrationUpgradeClient = Client
+export type MigrationUpgradeClient = TxOperations
 export type MigrateMode = 'create' | 'upgrade'
 
 /**
@@ -183,6 +182,7 @@ export async function tryMigrate (
       }
     }
     const st: MigrationState = {
+      _uuid: client.wsIds.uuid,
       plugin,
       state: migration.state,
       space: core.space.Configuration,
@@ -222,8 +222,7 @@ export async function tryUpgrade (
       plugin,
       state: upgrades.state
     }
-    const tx = new TxOperations(_client, core.account.System)
-    await tx.createDoc(core.class.MigrationState, core.space.Configuration, st)
+    await _client.createDoc(core.class.MigrationState, core.space.Configuration, st)
   }
 }
 
@@ -249,15 +248,14 @@ export async function createDefaultSpace<T extends Space> (
     ...defaults,
     ...props
   }
-  const tx = new TxOperations(client, core.account.System)
-  const current = await tx.findOne(core.class.Space, {
+  const current = await client.findOne(core.class.Space, {
     _id
   })
   if (current === undefined || current._class !== _class) {
     if (current !== undefined && current._class !== _class) {
-      await tx.remove(current)
+      await client.remove(current)
     }
-    await tx.createDoc(_class, core.space.Space, data, _id)
+    await client.createDoc(_class, core.space.Space, data, _id)
   }
 }
 

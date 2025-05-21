@@ -39,7 +39,11 @@ import core, {
   Timestamp,
   Tx,
   TxDb,
-  TxResult
+  TxResult,
+  type Account,
+  type AccountWorkspace,
+  type WorkspacesClient,
+  type WorkspaceUuid
 } from '@hcengineering/core'
 import { genMinModel } from './minmodel'
 
@@ -50,6 +54,7 @@ FulltextStorage & {
   isConnected: () => boolean
   loadModel: (last: Timestamp, hash?: string) => Promise<Tx[] | LoadModelResponse>
   pushHandler: (handler: Handler) => void
+  getAccount: () => Promise<Account>
 }
 > {
   const txes = genMinModel()
@@ -64,7 +69,7 @@ FulltextStorage & {
     await model.tx(tx)
   }
 
-  class TestConnection implements ClientConnection {
+  class TestConnection implements ClientConnection, WorkspacesClient {
     private readonly hierarchy: Hierarchy
     private readonly model: ModelDb
     private readonly transactions: TxDb
@@ -78,6 +83,12 @@ FulltextStorage & {
     isConnected (): boolean {
       return true
     }
+
+    getAvailableWorkspaces (): WorkspaceUuid[] {
+      return []
+    }
+
+    getWorkspaces: () => Record<WorkspaceUuid, AccountWorkspace> = () => ({})
 
     pushHandler (): void {}
 
@@ -150,17 +161,37 @@ FulltextStorage & {
 
     async sendForceClose (): Promise<void> {}
 
-    handler?: (event: ClientConnectEvent, lastTx: string | undefined, data: any) => Promise<void>
+    handler?: (
+      event: ClientConnectEvent,
+      lastTx: Record<WorkspaceUuid, string | undefined> | undefined,
+      data: any
+    ) => Promise<void>
 
     set onConnect (
-      handler: ((event: ClientConnectEvent, lastTx: string | undefined, data: any) => Promise<void>) | undefined
+      handler:
+      | ((
+        event: ClientConnectEvent,
+        lastTx: Record<WorkspaceUuid, string | undefined> | undefined,
+        data: any
+      ) => Promise<void>)
+      | undefined
     ) {
       this.handler = handler
-      void this.handler?.(ClientConnectEvent.Connected, '', {})
+      void this.handler?.(ClientConnectEvent.Connected, {}, {})
     }
 
-    get onConnect (): ((event: ClientConnectEvent, lastTx: string | undefined, data: any) => Promise<void>) | undefined {
+    get onConnect ():
+    | ((
+      event: ClientConnectEvent,
+      lastTx: Record<WorkspaceUuid, string | undefined> | undefined,
+      data: any
+    ) => Promise<void>)
+    | undefined {
       return this.handler
+    }
+
+    getAccount (): Promise<Account> {
+      throw new Error('Method not implemented.')
     }
   }
 

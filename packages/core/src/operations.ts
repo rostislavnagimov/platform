@@ -1,6 +1,16 @@
 import { Analytics } from '@hcengineering/analytics'
 import { deepEqual } from 'fast-equals'
-import { DocumentUpdate, DOMAIN_MODEL, Hierarchy, MixinData, MixinUpdate, ModelDb, platformNow, toFindResult } from '.'
+import {
+  DocumentUpdate,
+  DOMAIN_MODEL,
+  Hierarchy,
+  MixinData,
+  MixinUpdate,
+  ModelDb,
+  platformNow,
+  toFindResult,
+  type WorkspaceUuid
+} from '.'
 import type {
   PersonId,
   AnyAttribute,
@@ -12,7 +22,8 @@ import type {
   Mixin,
   Ref,
   Space,
-  Timestamp
+  Timestamp,
+  AccountWorkspace
 } from './classes'
 import { Client } from './client'
 import core from './component'
@@ -41,9 +52,22 @@ export class TxOperations implements Omit<Client, 'notify' | 'getConnection'> {
   constructor (
     readonly client: Client,
     readonly user: PersonId,
+    private readonly _workspaceUuid: WorkspaceUuid | (() => WorkspaceUuid),
     readonly isDerived: boolean = false
   ) {
-    this.txFactory = new TxFactory(user, isDerived)
+    this.txFactory = new TxFactory(user, _workspaceUuid, isDerived)
+  }
+
+  get workspaceUuid (): WorkspaceUuid {
+    return this.txFactory.workspaceUuid
+  }
+
+  getWorkspaces (): Record<WorkspaceUuid, AccountWorkspace> {
+    return this.client.getWorkspaces()
+  }
+
+  getAvailableWorkspaces (): WorkspaceUuid[] {
+    return this.client.getAvailableWorkspaces()
   }
 
   getHierarchy (): Hierarchy {
@@ -464,9 +488,11 @@ export class ApplyOperations extends TxOperations {
           this.txes.push(tx as TxCUD<Doc>)
         }
         return {}
-      }
+      },
+      getAvailableWorkspaces: () => ops.client.getAvailableWorkspaces(),
+      getWorkspaces: () => ops.client.getWorkspaces()
     }
-    super(txClient, ops.user, isDerived ?? false)
+    super(txClient, ops.user, ops.workspaceUuid, isDerived ?? false)
   }
 
   match<T extends Doc>(_class: Ref<Class<T>>, query: DocumentQuery<T>): ApplyOperations {
@@ -555,9 +581,11 @@ export class TxBuilder extends TxOperations {
           this.txes.push(tx as TxCUD<Doc>)
         }
         return {}
-      }
+      },
+      getAvailableWorkspaces: () => [] as WorkspaceUuid[],
+      getWorkspaces: () => ({})
     }
-    super(txClient, user)
+    super(txClient, user, core.workspace.Model)
   }
 }
 

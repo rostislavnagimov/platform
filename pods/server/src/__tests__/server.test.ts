@@ -19,7 +19,7 @@ import { RPCHandler, type Response } from '@hcengineering/rpc'
 import { generateToken } from '@hcengineering/server-token'
 import WebSocket from 'ws'
 
-import {
+import core, {
   Hierarchy,
   MeasureMetricsContext,
   ModelDb,
@@ -182,6 +182,7 @@ describe('server', () => {
             options?: FindOptions<T>
           ): Promise<FindResult<T>> => {
             const d: Doc & { sessionId: string } = {
+              _uuid: core.workspace.Any,
               _class: 'result' as Ref<Class<Doc>>,
               _id: '1' as Ref<Doc & { sessionId: string }>,
               space: '' as Ref<Space>,

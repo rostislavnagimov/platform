@@ -13,19 +13,19 @@
 // limitations under the License.
 //
 
-import { type Card, cardId, DOMAIN_CARD } from '@hcengineering/card'
-import core, { TxOperations, type Client, type Data, type Doc } from '@hcengineering/core'
+import { cardId, DOMAIN_CARD, type Card } from '@hcengineering/card'
+import core, { type TxOperations, type Data, type Doc } from '@hcengineering/core'
 import {
+  createOrUpdate,
   tryMigrate,
   tryUpgrade,
   type MigrateOperation,
   type MigrationClient,
-  type MigrationUpgradeClient,
-  createOrUpdate
+  type MigrationUpgradeClient
 } from '@hcengineering/model'
+import tags from '@hcengineering/tags'
 import view from '@hcengineering/view'
 import card from '.'
-import tags from '@hcengineering/tags'
 
 export const cardOperation: MigrateOperation = {
   async migrate (client: MigrationClient, mode): Promise<void> {
@@ -60,8 +60,7 @@ export const cardOperation: MigrateOperation = {
       {
         state: 'create-defaults',
         func: async (client) => {
-          const tx = new TxOperations(client, core.account.System)
-          await createDefaultProject(tx)
+          await createDefaultProject(client)
         }
       },
       {
@@ -72,15 +71,14 @@ export const cardOperation: MigrateOperation = {
   }
 }
 
-async function removeVariantViewlets (client: Client): Promise<void> {
-  const txOp = new TxOperations(client, core.account.System)
+async function removeVariantViewlets (client: TxOperations): Promise<void> {
   const desc = client
     .getHierarchy()
     .getDescendants(card.class.Card)
     .filter((c) => c !== card.class.Card)
   const viewlets = await client.findAll(view.class.Viewlet, { attachTo: { $in: desc }, variant: { $exists: true } })
   for (const viewlet of viewlets) {
-    await txOp.remove(viewlet)
+    await client.remove(viewlet)
   }
 }
 
@@ -108,8 +106,7 @@ function extractObjectData<T extends Doc> (doc: T): Data<T> {
   return data as Data<T>
 }
 
-async function migrateViewlets (client: Client): Promise<void> {
-  const txOp = new TxOperations(client, core.account.System)
+async function migrateViewlets (client: TxOperations): Promise<void> {
   const viewlets = await client.findAll(view.class.Viewlet, { attachTo: card.class.Card, variant: { $exists: false } })
   const masterTags = await client.findAll(card.class.MasterTag, {})
   const currentViewlets = await client.findAll(view.class.Viewlet, { attachTo: { $in: masterTags.map((p) => p._id) } })
@@ -134,13 +131,13 @@ async function migrateViewlets (client: Client): Promise<void> {
         (p) => p.attachTo === masterTag._id && p.variant === viewlet.variant && p.descriptor === viewlet.descriptor
       )
       if (current === undefined) {
-        await txOp.createDoc(view.class.Viewlet, core.space.Model, {
+        await client.createDoc(view.class.Viewlet, core.space.Model, {
           ...base,
           config: resConfig,
           attachTo: masterTag._id
         })
       } else {
-        await txOp.diffUpdate(current, {
+        await client.diffUpdate(current, {
           ...base,
           config: resConfig,
           attachTo: masterTag._id
@@ -193,10 +190,9 @@ async function migrateSpaces (client: MigrationClient): Promise<void> {
   await client.update(DOMAIN_CARD, { space: core.space.Workspace }, { space: card.space.Default })
 }
 
-async function defaultLabels (client: Client): Promise<void> {
-  const ops = new TxOperations(client, core.account.System)
+async function defaultLabels (client: TxOperations): Promise<void> {
   await createOrUpdate(
-    ops,
+    client,
     tags.class.TagCategory,
     core.space.Workspace,
     {
@@ -210,7 +206,7 @@ async function defaultLabels (client: Client): Promise<void> {
   )
 
   await createOrUpdate(
-    ops,
+    client,
     tags.class.TagElement,
     core.space.Workspace,
     {
@@ -224,7 +220,7 @@ async function defaultLabels (client: Client): Promise<void> {
   )
 
   await createOrUpdate(
-    ops,
+    client,
     tags.class.TagElement,
     core.space.Workspace,
     {

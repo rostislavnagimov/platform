@@ -15,6 +15,7 @@
 
 import {
   type Account,
+  type AccountWorkspace,
   type Class,
   type Client,
   type Doc,
@@ -31,13 +32,14 @@ import {
   type Tx,
   TxOperations,
   type TxResult,
-  type WithLookup
+  type WithLookup,
+  type WorkspaceUuid
 } from '@hcengineering/core'
 import { RestClientImpl } from './rest'
 
 export async function createRestTxOperations (
   endpoint: string,
-  workspaceId: string,
+  workspaceId: WorkspaceUuid,
   token: string
 ): Promise<TxOperations> {
   const restClient = new RestClientImpl(endpoint, workspaceId, token)
@@ -45,7 +47,7 @@ export async function createRestTxOperations (
   const account = await restClient.getAccount()
   const { hierarchy, model } = await restClient.getModel()
 
-  return new TxOperations(new RestTxClient(restClient, hierarchy, model, account), account.socialIds[0])
+  return new TxOperations(new RestTxClient(restClient, hierarchy, model, account), account.socialIds[0], workspaceId)
 }
 
 class RestTxClient implements Client {
@@ -58,6 +60,12 @@ class RestTxClient implements Client {
 
   close (): Promise<void> {
     return Promise.resolve()
+  }
+
+  getWorkspaces: () => Record<WorkspaceUuid, AccountWorkspace> = () => ({})
+
+  getAvailableWorkspaces (): WorkspaceUuid[] {
+    return [this.client.workspace]
   }
 
   async findAll<T extends Doc>(

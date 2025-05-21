@@ -13,7 +13,7 @@
 // limitations under the License.
 //
 import { Analytics } from '@hcengineering/analytics'
-import {
+import core, {
   AccountInfo,
   AccountRole,
   type AccountUuid,
@@ -61,6 +61,7 @@ import {
   createAccount,
   createWorkspaceRecord,
   doJoinByInvite,
+  doReleaseSocialId,
   EndpointKind,
   generatePassword,
   getAccount,
@@ -70,6 +71,7 @@ import {
   getFrontUrl,
   getInviteEmail,
   getMailUrl,
+  getPersonalWorkspace,
   getPersonName,
   getRegions,
   getRolePower,
@@ -84,7 +86,6 @@ import {
   isEmail,
   isOtpValid,
   normalizeValue,
-  doReleaseSocialId,
   selectWorkspace,
   sendEmail,
   sendEmailConfirmation,
@@ -1236,6 +1237,10 @@ export async function getWorkspaceInfo (
   const isGuest = extra?.guest === 'true'
   const skipAssignmentCheck = isGuest || account === systemAccountUuid
 
+  if (workspaceUuid === '' || workspaceUuid == null) {
+    throw new PlatformError(new Status(Severity.ERROR, platform.status.WorkspaceNotFound, { workspaceUuid }))
+  }
+
   if (!skipAssignmentCheck) {
     const role = await db.getWorkspaceRole(account, workspaceUuid)
 
@@ -1326,6 +1331,12 @@ export async function getLoginInfoByToken (
     throw new PlatformError(new Status(Severity.ERROR, platform.status.InternalServerError, {}))
   }
 
+  const account = await db.account.findOne({ uuid: accountUuid })
+
+  if (account == null) {
+    throw new PlatformError(new Status(Severity.ERROR, platform.status.InternalServerError, {}))
+  }
+
   const loginInfo = {
     account: accountUuid,
     name: getPersonName(person),
@@ -1410,7 +1421,8 @@ export async function getLoginWithWorkspaceInfo (
       return {
         account: accountUuid,
         workspaces: {},
-        socialIds: []
+        socialIds: [],
+        personalWorkspace: core.workspace.Personal
       }
     }
   }
@@ -1436,6 +1448,14 @@ export async function getLoginWithWorkspaceInfo (
     throw new PlatformError(new Status(Severity.ERROR, platform.status.InternalServerError, {}))
   }
 
+  const account = await db.account.findOne({ uuid: accountUuid })
+
+  if (account == null) {
+    throw new PlatformError(new Status(Severity.ERROR, platform.status.InternalServerError, {}))
+  }
+
+  const personalWorkspace = await getPersonalWorkspace(db, account)
+
   const userWorkspaces = (await db.getAccountWorkspaces(accountUuid)).filter((it) => isActiveMode(it.status.mode))
   const roles: Map<WorkspaceUuid, AccountRole | null> = await getWorkspaceRoles(db, accountUuid)
 
@@ -1445,6 +1465,7 @@ export async function getLoginWithWorkspaceInfo (
     name: getPersonName(person),
     socialId: socialIds[0]?._id,
     token,
+    personalWorkspace: personalWorkspace.uuid,
     workspaces: Object.fromEntries(
       isSystem || isDocGuest
         ? []
@@ -1453,6 +1474,7 @@ export async function getLoginWithWorkspaceInfo (
           {
             url: it.url,
             dataId: it.dataId,
+            name: it.name,
             mode: it.status.mode,
             endpoint: getWorkspaceEndpoint(info, it.uuid, it.region),
             role: roles.get(it.uuid) ?? null,

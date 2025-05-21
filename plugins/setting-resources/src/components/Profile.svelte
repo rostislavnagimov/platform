@@ -37,7 +37,7 @@
   const account = getCurrentAccount()
   const me = getCurrentEmployee()
   const employee = $personByIdStore.get(me)
-  const email = account.fullSocialIds.find((si) => si.type === SocialIdType.EMAIL)?.value ?? ''
+  const email = account.fullSocialIds.values().find((si) => si.type === SocialIdType.EMAIL)?.value ?? ''
 
   let firstName = employee !== undefined ? getFirstName(employee.name) : ''
   let lastName = employee !== undefined ? getLastName(employee.name) : ''

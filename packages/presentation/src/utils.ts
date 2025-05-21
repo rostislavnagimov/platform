@@ -22,6 +22,7 @@ import core, {
   TxOperations,
   TxProcessor,
   type Account,
+  type AccountWorkspace,
   type ArrOf,
   type AttachedDoc,
   type Class,
@@ -47,6 +48,7 @@ import core, {
   type Type,
   type TypeAny,
   type WithLookup,
+  type WorkspacesClient,
   type WorkspaceUuid
 } from '@hcengineering/core'
 import { getMetadata, getResource } from '@hcengineering/platform'
@@ -63,8 +65,18 @@ import plugin from './plugin'
 
 export { reduceCalls } from '@hcengineering/core'
 
-let liveQuery: LQ
-let rawLiveQuery: LQ
+class ExLQ extends LQ implements WorkspacesClient {
+  getAvailableWorkspaces (): WorkspaceUuid[] {
+    return this.client.getAvailableWorkspaces()
+  }
+
+  getWorkspaces (): Record<WorkspaceUuid, AccountWorkspace> {
+    return this.client.getWorkspaces()
+  }
+}
+
+let liveQuery: ExLQ
+let rawLiveQuery: ExLQ
 let client: TxOperations & Client
 let pipeline: PresentationPipeline
 
@@ -98,14 +110,14 @@ export const pendingCreatedDocs = writable<Record<Ref<Doc>, boolean>>({})
 
 class UIClient extends TxOperations implements Client {
   hook = getMetadata(plugin.metadata.ClientHook)
+  pendingTxes = new Set<Ref<Tx>>()
   constructor (
     client: Client,
-    private readonly liveQuery: Client
+    private readonly liveQuery: Client,
+    workspace: () => WorkspaceUuid
   ) {
-    super(client, getCurrentAccount().primarySocialId)
+    super(client, getCurrentAccount().primarySocialId, workspace)
   }
-
-  protected pendingTxes = new Set<Ref<Tx>>()
 
   async doNotify (...tx: Tx[]): Promise<void> {
     const pending = get(pendingCreatedDocs)
@@ -256,6 +268,18 @@ export function getClient (): TxOperations & Client {
   return clientProxy
 }
 
+let targetWorkspace: WorkspaceUuid | undefined
+
+export function setTargetWorkspace (workspace: WorkspaceUuid): void {
+  targetWorkspace = workspace
+}
+export function getTargetWorkspace (): WorkspaceUuid {
+  if (targetWorkspace === undefined) {
+    throw new Error('Target workspace is not set')
+  }
+  return targetWorkspace
+}
+
 export type OnClientListener = (client: Client, account: Account) => void | Promise<void>
 const onClientListeners: OnClientListener[] = []
 
@@ -278,6 +302,12 @@ export function addRefreshListener (r: RefreshListener): void {
   refreshListeners.add(r)
 }
 
+export const singleWorkspace = writable<boolean>(false)
+
+export function setSingleWorkspace (value: boolean): void {
+  singleWorkspace.set(value)
+}
+
 /**
  * @public
  */
@@ -294,7 +324,7 @@ export async function setClient (_client: Client): Promise<void> {
   }
 
   const needRefresh = liveQuery !== undefined
-  rawLiveQuery = new LQ(_client)
+  rawLiveQuery = new ExLQ(_client)
 
   const factories = await _client.findAll(plugin.class.PresentationMiddlewareFactory, {})
   const promises = factories.map(async (it) => await getResource(it.createPresentationMiddleware))
@@ -302,9 +332,10 @@ export async function setClient (_client: Client): Promise<void> {
   // eslint-disable-next-line @typescript-eslint/unbound-method
   pipeline = PresentationPipelineImpl.create(_client, [OptimizeQueryMiddleware.create, ...creators])
 
-  liveQuery = new LQ(pipeline)
+  liveQuery = new ExLQ(pipeline)
 
-  const uiClient = new UIClient(pipeline, liveQuery)
+  // Select first workspace if not set
+  const uiClient = new UIClient(pipeline, liveQuery, () => getTargetWorkspace())
 
   client = uiClient
 

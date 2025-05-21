@@ -69,12 +69,24 @@ export interface Obj {
   _class: Ref<Class<this>>
 }
 
+export interface AccountWorkspace {
+  url?: string
+  name?: string
+  role: AccountRole
+  maintenance: boolean
+  enabled: boolean
+}
+
 export interface Account {
   uuid: AccountUuid
-  role: AccountRole
+  role: AccountRole // Role in current workspace
+  targetWorkspace: WorkspaceUuid // Will point to a selected workspace, if not will point to personal workspace.
+  personalWorkspace: WorkspaceUuid // Will be filled with personal workspace UUID or will be core.workspace.NoPersonalWorkspace
   primarySocialId: PersonId
   socialIds: PersonId[]
-  fullSocialIds: SocialId[]
+  fullSocialIds: Map<PersonId, SocialId>
+  socialIdsByValue: Map<string, SocialId>
+  workspaces: Record<WorkspaceUuid, AccountWorkspace>
 }
 
 /**
@@ -106,6 +118,7 @@ export interface BasePerson {
  */
 export interface Doc<S extends Space = Space> extends Obj {
   _id: Ref<this>
+  _uuid: WorkspaceUuid
   space: Ref<S>
   modifiedOn: Timestamp
   modifiedBy: PersonId
@@ -810,6 +823,7 @@ export interface WorkspaceInfo {
   createdOn: number
   createdBy?: PersonUuid // Should always be set for NEW workspaces
   billingAccount?: PersonUuid // Should always be set for NEW workspaces
+  personal?: boolean
 }
 
 export interface BackupStatus {

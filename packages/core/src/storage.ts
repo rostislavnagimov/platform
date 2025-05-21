@@ -18,6 +18,7 @@ import type { Asset, Resource } from '@hcengineering/platform'
 import type { KeysByType } from 'simplytyped'
 import type { Association, AttachedDoc, Class, Doc, Ref, Space } from './classes'
 import type { Tx } from './tx'
+import type { WorkspaceUuid } from '.'
 
 /**
  * @public
@@ -120,6 +121,8 @@ export type AssociationQuery = [Ref<Association>, 1 | -1]
  */
 // eslint-disable-next-line @typescript-eslint/consistent-type-definitions
 export type FindOptions<T extends Doc> = {
+  workspace?: WorkspaceUuid | { $in: WorkspaceUuid[] } | { $nin: WorkspaceUuid[] }
+
   limit?: number
   sort?: SortingQuery<T>
   lookup?: Lookup<T>

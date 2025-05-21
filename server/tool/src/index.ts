@@ -34,7 +34,6 @@ import core, {
   TxOperations,
   WorkspaceIds,
   WorkspaceUuid,
-  type Client,
   type PersonInfo,
   type Ref,
   type WithLookup
@@ -122,6 +121,7 @@ export async function initModel (
   try {
     logger.log('creating database...', { workspaceId })
     const firstTx: Tx = {
+      _uuid: workspaceId,
       _class: core.class.Tx,
       _id: 'first-tx' as Ref<Tx>,
       modifiedBy: core.account.System,
@@ -249,7 +249,7 @@ export async function upgradeModel (
   wsIds: WorkspaceIds,
   txes: Tx[],
   pipeline: Pipeline,
-  connection: Client,
+  connection: TxOperations,
   storageAdapter: StorageAdapter,
   accountClient: AccountClient,
   queue: PlatformQueueProducer<QueueWorkspaceMessage>,

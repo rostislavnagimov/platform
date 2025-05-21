@@ -51,6 +51,7 @@ import presentation, {
   createQuery,
   type DocCreatePhase,
   getClient,
+  getTargetWorkspace,
   type ObjectSearchResult
 } from '@hcengineering/presentation'
 import {
@@ -798,6 +799,7 @@ async function initMeetingMinutes (room: Room): Promise<void> {
       .replace(',', ' at')
     const _id = generateId<MeetingMinutes>()
     const newDoc: MeetingMinutes = {
+      _uuid: getTargetWorkspace(),
       _id,
       _class: love.class.MeetingMinutes,
       attachedTo: room._id,

@@ -109,7 +109,7 @@ export class WorkspaceClient {
     }
     if (!deleted && socialIds.length > 0) {
       this.ctx.info('Clean up integrations without clients')
-      const tx = new TxOperations(this.client, socialIds[0]._id)
+      const tx = new TxOperations(this.client, socialIds[0]._id, this.workspace)
       await cleanIntegrations(this.ctx, tx, userId, this.workspace)
     }
 

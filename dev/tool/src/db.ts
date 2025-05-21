@@ -96,7 +96,7 @@ async function moveWorkspace (
     const token = generateToken(systemAccountUuid, wsId, { service: 'tool' })
     const endpoint = await getTransactorEndpoint(token, 'external')
     const connection = (await connect(endpoint, wsId, undefined, {
-      model: 'upgrade'
+      mode: 'backup'
     })) as unknown as Client & BackupClient
     for (const collection of collections) {
       const domain = translateDomain(collection.collectionName)

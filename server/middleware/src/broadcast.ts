@@ -14,6 +14,7 @@
 //
 
 import {
+  groupByArray,
   TxProcessor,
   type BroadcastTargets,
   type Class,
@@ -139,17 +140,20 @@ export class BroadcastMiddleware extends BaseMiddleware implements Middleware {
     target: string | undefined,
     exclude: string[] | undefined
   ): Promise<void> {
-    const classes = new Set<Ref<Class<Doc>>>()
-    for (const dtx of derived) {
-      if (TxProcessor.isExtendsCUD(dtx._class)) {
-        classes.add((dtx as TxCUD<Doc>).objectClass)
-        const attachedToClass = (dtx as TxCUD<Doc>).attachedToClass
-        if (attachedToClass !== undefined) {
-          classes.add(attachedToClass)
+    const byWorkspace = groupByArray(derived, (it) => it._uuid)
+    for (const [uuid, dtxs] of byWorkspace) {
+      const classes = new Set<Ref<Class<Doc>>>()
+      for (const dtx of dtxs) {
+        if (TxProcessor.isExtendsCUD(dtx._class)) {
+          classes.add((dtx as TxCUD<Doc>).objectClass)
+          const attachedToClass = (dtx as TxCUD<Doc>).attachedToClass
+          if (attachedToClass !== undefined) {
+            classes.add(attachedToClass)
+          }
         }
       }
+      const bevent = createBroadcastEvent(uuid, Array.from(classes))
+      this.broadcast(ctx, [bevent], target, exclude)
     }
-    const bevent = createBroadcastEvent(Array.from(classes))
-    this.broadcast(ctx, [bevent], target, exclude)
   }
 }

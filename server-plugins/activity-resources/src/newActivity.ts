@@ -75,7 +75,8 @@ async function createMessages (
   for (const data of result) {
     void api.event(
       {
-        account: systemAccount
+        // TODO: Fix me, Undetermined role is missing in communication API
+        account: systemAccount as any
       },
       {
         type: MessageRequestEventType.CreateMessage,
@@ -146,7 +147,7 @@ async function getUpdateText (update: ActivityUpdate, card: Card, hierarchy: Hie
       if (isUnset) {
         return await translate(activity.string.UnsetObject, { object: attrName })
       } else {
-        const values = await getAttributeValues(set, attrClass)
+        const values = await getAttributeValues(set, attrClass as any)
         if (values !== undefined) {
           return await translate(activity.string.AttributeSetTo, {
             name: capitalizeFirstLetter(attrName),
@@ -159,7 +160,7 @@ async function getUpdateText (update: ActivityUpdate, card: Card, hierarchy: Hie
   }
 
   if (update.type === ActivityUpdateType.Tag) {
-    const clazz = hierarchy.getClass(update.tag)
+    const clazz = hierarchy.getClass(update.tag as any)
     if (update.action === 'add') {
       const tagName = await translate(clazz.label, {})
       return await translate(activity.string.AddedTag, { title: tagName })

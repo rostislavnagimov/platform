@@ -30,7 +30,7 @@ export class PushHandler {
   async sync (token: Token, calendarId: string | null): Promise<void> {
     await this.ctx.with('Push handler', { workspace: token.workspace, user: token.userId }, async () => {
       const client = await getClient(getWorkspaceToken(token.workspace))
-      const txOp = new TxOperations(client, core.account.System)
+      const txOp = new TxOperations(client, core.account.System, token.workspace)
       const res = getGoogleClient()
       res.auth.setCredentials(token)
       await IncomingSyncManager.push(this.ctx, this.accountClient, txOp, token, res.google, calendarId)

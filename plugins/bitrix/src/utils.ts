@@ -99,7 +99,7 @@ export interface ConvertResult {
  * @public
  */
 export async function convert (
-  client: Client,
+  client: TxOperations,
   entity: BitrixEntityMapping,
   space: Ref<Space>,
   fields: BitrixFieldMapping[],
@@ -113,6 +113,7 @@ export async function convert (
   const hierarchy = client.getHierarchy()
   const bitrixId = `${rawDocument.ID as string}`
   const document: BitrixSyncDoc = {
+    _uuid: client.workspaceUuid,
     _id: generateId(),
     type: entity.type,
     bitrixId,
@@ -307,6 +308,7 @@ export async function convert (
             .find((it) => it.value === svalue)
           if (existingC === undefined) {
             const c: Channel & BitrixSyncDoc = {
+              _uuid: client.workspaceUuid,
               _id: generateId(),
               _class: contact.class.Channel,
               attachedTo: document._id,
@@ -355,6 +357,7 @@ export async function convert (
         let tag: TagElement | undefined = allTagElements.find((it) => it.title === vv)
         if (tag === undefined) {
           tag = {
+            _uuid: client.workspaceUuid,
             _id: generateId(),
             _class: tags.class.TagElement,
             category: defaultCategory._id,
@@ -369,6 +372,7 @@ export async function convert (
           newExtraDocs.push(tag)
         }
         const ref: TagReference & BitrixSyncDoc = {
+          _uuid: client.workspaceUuid,
           _id: generateId(),
           attachedTo: existingId ?? document._id,
           attachedToClass: attr.attributeOf,
@@ -463,7 +467,7 @@ export async function convert (
         )
 
         const candidate = doc.mixins[recruit.mixin.Candidate] as Data<Candidate>
-        const ops = new TxOperations(client, document.modifiedBy)
+        const ops = new TxOperations(client, document.modifiedBy, client.workspaceUuid)
         let statusName = sourceStatusName
         let mapping: BitrixStateMapping | undefined
         for (const t of operation.stateMapping ?? []) {
@@ -561,6 +565,7 @@ export async function convert (
         const blobRefs: { file: string, id: string }[] = await getDownloadValue(attr, f.operation)
         for (const blobRef of blobRefs) {
           const attachDoc: Attachment & BitrixSyncDoc = {
+            _uuid: client.workspaceUuid,
             _id: generateId(),
             bitrixId: `${blobRef.id}`,
             file: '' as Ref<PlatformBlob>, // Empty since not uploaded yet.

@@ -7,7 +7,6 @@ import core, {
   TxOperations,
   versionToString,
   type Branding,
-  type Client,
   type Data,
   type MeasureContext,
   type Tx,
@@ -102,7 +101,7 @@ export async function createWorkspace (
         initModel(ctx, wsId, txes, txAdapter, storageAdapter, ctxModellogger, async (value) => {})
       )
 
-      const client = new TxOperations(wrapPipeline(ctx, pipeline, wsIds), core.account.ConfigUser)
+      const client = new TxOperations(wrapPipeline(ctx, pipeline, wsIds), core.account.ConfigUser, wsIds.uuid)
 
       await updateModel(
         childLogger,
@@ -123,7 +122,7 @@ export async function createWorkspace (
       if (creatorUuid != null) {
         const personInfo = await accountClient.getPersonInfo(creatorUuid)
 
-        if (personInfo?.socialIds.length > 0) {
+        if (personInfo?.socialIds.length > 0 && !(workspaceInfo.personal === true && branding == null)) {
           await initializeWorkspace(
             childLogger,
             branding,
@@ -230,7 +229,7 @@ export async function upgradeWorkspace (
       url: ws.url ?? '',
       dataId: ws.dataId
     }
-
+    const client = new TxOperations(wrapPipeline(ctx, pipeline, wsUrl), core.account.System, ws.uuid)
     await upgradeWorkspaceWith(
       ctx,
       version,
@@ -238,7 +237,7 @@ export async function upgradeWorkspace (
       migrationOperation,
       ws,
       pipeline,
-      wrapPipeline(ctx, pipeline, wsUrl),
+      client,
       storageAdapter,
       accountClient,
       queue,
@@ -265,7 +264,7 @@ export async function upgradeWorkspaceWith (
   migrationOperation: [string, MigrateOperation][],
   ws: WorkspaceInfoWithStatus,
   pipeline: Pipeline,
-  connection: Client,
+  connection: TxOperations,
   storageAdapter: StorageAdapter,
   accountClient: AccountClient,
   queue: PlatformQueueProducer<QueueWorkspaceMessage>,

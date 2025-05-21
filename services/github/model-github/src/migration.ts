@@ -205,6 +205,7 @@ async function migrateFixMissingDocSyncInfo (client: MigrationClient): Promise<v
           counter++
           // Missing
           await client.create<DocSyncInfo>(DOMAIN_GITHUB, {
+            _uuid: client.wsIds.uuid,
             _class: github.class.DocSyncInfo,
             _id: issue._id as any,
             url: '',

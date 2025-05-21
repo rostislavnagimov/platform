@@ -22,13 +22,26 @@ import client, {
   pingConst,
   pongConst
 } from '@hcengineering/client'
+import { EventResult } from '@hcengineering/communication-sdk-types'
+import {
+  Collaborator,
+  FindCollaboratorsParams,
+  FindLabelsParams,
+  FindMessagesGroupsParams,
+  FindMessagesParams,
+  FindNotificationContextParams,
+  FindNotificationsParams,
+  Label,
+  Message,
+  MessagesGroup,
+  NotificationContext
+} from '@hcengineering/communication-types'
 import core, {
   Account,
   Class,
   ClientConnectEvent,
   ClientConnection,
   clone,
-  Handler,
   Doc,
   DocChunk,
   DocumentQuery,
@@ -36,6 +49,7 @@ import core, {
   FindOptions,
   FindResult,
   generateId,
+  Handler,
   LoadModelResponse,
   type MeasureContext,
   MeasureMetricsContext,
@@ -50,6 +64,8 @@ import core, {
   TxApplyIf,
   TxHandler,
   TxResult,
+  type TxWorkspaceEvent,
+  WorkspaceEvent,
   type WorkspaceUuid
 } from '@hcengineering/core'
 import platform, {
@@ -60,22 +76,8 @@ import platform, {
   Status,
   UNAUTHORIZED
 } from '@hcengineering/platform'
+import { HelloRequest, HelloResponse, type RateLimitInfo, ReqId, type Response, RPCHandler } from '@hcengineering/rpc'
 import { uncompress } from 'snappyjs'
-import { HelloRequest, HelloResponse, ReqId, type Response, RPCHandler, type RateLimitInfo } from '@hcengineering/rpc'
-import { EventResult } from '@hcengineering/communication-sdk-types'
-import {
-  FindLabelsParams,
-  FindMessagesGroupsParams,
-  FindMessagesParams,
-  FindNotificationContextParams,
-  FindNotificationsParams,
-  FindCollaboratorsParams,
-  Label,
-  Message,
-  MessagesGroup,
-  NotificationContext,
-  Collaborator
-} from '@hcengineering/communication-types'
 
 const SECOND = 1000
 const pingTimeout = 10 * SECOND
@@ -128,19 +130,15 @@ class Connection implements ClientConnection {
   private readonly sessionId: string | undefined
   private closed = false
 
-  private upgrading: boolean = false
-
   private pingResponse: number = Date.now()
 
   private helloReceived: boolean = false
 
   private account: Account | undefined
 
-  onConnect?: (event: ClientConnectEvent, lastTx: string | undefined, data: any) => Promise<void>
-
   rpcHandler: RPCHandler
 
-  lastHash?: string
+  lastHash?: Record<WorkspaceUuid, string | undefined>
 
   handlers: Handler[] = []
 
@@ -172,7 +170,6 @@ class Connection implements ClientConnection {
     }
     this.rpcHandler = opt?.useGlobalRPCHandler === true ? globalRPCHandler : new RPCHandler()
     this.pushHandler(handler)
-    this.onConnect = opt?.onConnect
 
     this.scheduleOpen(this.ctx, false)
   }
@@ -181,9 +178,9 @@ class Connection implements ClientConnection {
     this.handlers.push(handler)
   }
 
-  async getLastHash (ctx: MeasureContext): Promise<string | undefined> {
+  async getLastHash (ctx: MeasureContext): Promise<Record<WorkspaceUuid, string | undefined>> {
     await this.waitOpenConnection(ctx)
-    return this.lastHash
+    return this.lastHash ?? {}
   }
 
   private schedulePing (socketId: number): void {
@@ -195,7 +192,7 @@ class Connection implements ClientConnection {
         clearInterval(interval)
         return
       }
-      if (!this.upgrading && this.pingResponse !== 0 && Date.now() - this.pingResponse > hangTimeout) {
+      if (this.pingResponse !== 0 && Date.now() - this.pingResponse > hangTimeout) {
         // No ping response from server.
 
         if (this.websocket !== null) {
@@ -324,12 +321,6 @@ class Connection implements ClientConnection {
         if (resp.error?.code === UNAUTHORIZED.code) {
           this.opt?.onUnauthorized?.()
         }
-        if (resp.error?.code === platform.status.WorkspaceArchived) {
-          this.opt?.onArchived?.()
-        }
-        if (resp.error?.code === platform.status.WorkspaceMigration) {
-          this.opt?.onMigration?.()
-        }
       }
 
       if (resp.id !== undefined) {
@@ -358,12 +349,6 @@ class Connection implements ClientConnection {
 
     if (resp.id === -1) {
       this.delay = 0
-      if (resp.result?.state === 'upgrading') {
-        void this.onConnect?.(ClientConnectEvent.Maintenance, undefined, resp.result.stats)
-        this.upgrading = true
-        this.delay = 3
-        return
-      }
       if (resp.result === 'hello') {
         const helloResp = resp as HelloResponse
         this.binaryMode = helloResp.binary
@@ -385,13 +370,9 @@ class Connection implements ClientConnection {
           return
         }
         this.account = helloResp.account
-        this.helloReceived = true
-        if (this.upgrading) {
-          // We need to call upgrade since connection is upgraded
-          this.opt?.onUpgrade?.()
-        }
+        this.opt?.onAccount?.(this.account)
 
-        this.upgrading = false
+        this.helloReceived = true
         // Notify all waiting connection listeners
         const handlers = this.onConnectHandlers.splice(0, this.onConnectHandlers.length)
         for (const h of handlers) {
@@ -402,13 +383,15 @@ class Connection implements ClientConnection {
           v.reconnect?.()
         }
 
-        void this.onConnect?.(
-          helloResp.reconnect === true ? ClientConnectEvent.Reconnected : ClientConnectEvent.Connected,
-          helloResp.lastTx,
-          this.sessionId
-        )?.catch((err) => {
-          this.ctx.error('failed to call onConnect', { err })
-        })
+        void this.opt
+          ?.onConnect?.(
+            helloResp.reconnect === true ? ClientConnectEvent.Reconnected : ClientConnectEvent.Connected,
+            helloResp.lastTx,
+            this.sessionId
+          )
+          ?.catch((err) => {
+            this.ctx.error('failed to call onConnect', { err })
+          })
         this.schedulePing(socketId)
         return
       } else {
@@ -452,7 +435,7 @@ class Connection implements ClientConnection {
             if (c.data.total !== 0) {
               total = c.data.total
             }
-            if (c.data.lookupMap !== undefined) {
+            if (c.data.lookupMap != null) {
               lookupMap = c.data.lookupMap
             }
             result = result.concat(c.data)
@@ -510,9 +493,20 @@ class Connection implements ClientConnection {
       const txArr = Array.isArray(resp.result) ? (resp.result as Tx[]) : [resp.result as Tx]
 
       for (const tx of txArr) {
-        if (tx?._class === core.class.TxModelUpgrade) {
-          console.log('Processing upgrade', this.workspace, this.user)
-          this.opt?.onUpgrade?.()
+        if (tx?._class === core.class.TxWorkspaceEvent) {
+          const event = tx as TxWorkspaceEvent
+          // TODO: Check
+          if (event.event === WorkspaceEvent.WorkspaceMaintenance || event.event === WorkspaceEvent.WorkpaceActive) {
+            console.log('Processing upgrade', this.workspace, this.user)
+
+            if (this.account !== undefined) {
+              const ws = this.account.workspaces[event._uuid]
+              if (ws != null) {
+                ws.maintenance = event.event === WorkspaceEvent.WorkspaceMaintenance
+                this.opt?.onAccount?.(this.account)
+              }
+            }
+          }
           return
         }
       }
@@ -833,7 +827,7 @@ class Connection implements ClientConnection {
         }
       }
     })
-    if (result.lookupMap !== undefined) {
+    if (result.lookupMap != null) {
       // We need to extract lookup map to document lookups
       for (const d of result) {
         if (d.$lookup !== undefined) {

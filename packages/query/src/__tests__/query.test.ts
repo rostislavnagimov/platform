@@ -43,7 +43,7 @@ async function getClient (): Promise<{ liveQuery: LiveQuery, factory: TxOperatio
       console.log(err)
     })
   }
-  return { liveQuery, factory: new TxOperations(storage, core.account.System) }
+  return { liveQuery, factory: new TxOperations(storage, core.account.System, core.workspace.Model) }
 }
 
 describe('query', () => {
@@ -390,6 +390,7 @@ describe('query', () => {
   it('lookup query add doc', async () => {
     const { liveQuery, factory } = await getClient()
     const futureSpace: Space = {
+      _uuid: core.workspace.Model,
       _id: generateId(),
       _class: core.class.Space,
       private: false,
@@ -446,6 +447,7 @@ describe('query', () => {
   it('lookup nested query add doc', async () => {
     const { liveQuery, factory } = await getClient()
     const futureSpace: Space = {
+      _uuid: core.workspace.Model,
       _id: generateId(),
       _class: core.class.Space,
       private: false,

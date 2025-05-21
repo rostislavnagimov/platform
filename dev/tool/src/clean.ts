@@ -86,11 +86,10 @@ export async function cleanWorkspace (
   opt: { recruit: boolean, tracker: boolean, removedTx: boolean }
 ): Promise<void> {
   const connection = (await connect(transactorUrl, workspaceId, undefined, {
-    mode: 'backup',
-    model: 'upgrade'
+    mode: 'backup'
   })) as unknown as CoreClient & BackupClient
   try {
-    const ops = new TxOperations(connection, core.account.System)
+    const ops = new TxOperations(connection, core.account.System, workspaceId)
 
     const hierarchy = ops.getHierarchy()
 
@@ -164,6 +163,7 @@ export async function cleanWorkspace (
       client.close()
     }
   } catch (err: any) {
+    // TODO: Add force-close
     console.trace(err)
   } finally {
     await connection.close()
@@ -232,8 +232,7 @@ export async function cleanRemovedTransactions (workspaceId: WorkspaceUuid, tran
 
 export async function optimizeModel (workspaceId: WorkspaceUuid, transactorUrl: string): Promise<void> {
   const connection = (await connect(transactorUrl, workspaceId, undefined, {
-    mode: 'backup',
-    model: 'upgrade'
+    mode: 'backup'
   })) as unknown as CoreClient & BackupClient
   try {
     let count = 0
@@ -298,6 +297,8 @@ export async function optimizeModel (workspaceId: WorkspaceUuid, transactorUrl: 
   } catch (err: any) {
     console.trace(err)
   } finally {
+    // TODO: Add force-close
+    await connection.sendForceClose()
     await connection.close()
   }
 }
@@ -307,7 +308,7 @@ export async function cleanArchivedSpaces (workspaceId: WorkspaceUuid, transacto
   })) as unknown as CoreClient & BackupClient
   try {
     const count = 0
-    const ops = new TxOperations(connection, core.account.System)
+    const ops = new TxOperations(connection, core.account.System, workspaceId)
     while (true) {
       const spaces = await connection.findAll(core.class.Space, { archived: true }, { limit: 1000 })
       if (spaces.length === 0) {
@@ -475,7 +476,7 @@ export async function fixSkills (
     // fix skills with + and -
     if (step === '3') {
       console.log('STEP 3')
-      const ops = new TxOperations(connection, core.account.System)
+      const ops = new TxOperations(connection, core.account.System, workspaceId)
       const regex = /\S+(?:[-+]\S+)+/g
       const tagsToClean = (await connection.findAll(tags.class.TagElement, {
         category: {
@@ -532,7 +533,7 @@ export async function fixSkills (
         }
       })) as TagElement[]
       goodTags = goodTags.sort((a, b) => b.title.length - a.title.length).filter((t) => t.title.length > 2)
-      const ops = new TxOperations(connection, core.account.System)
+      const ops = new TxOperations(connection, core.account.System, workspaceId)
       const tagsToClean = (await connection.findAll(tags.class.TagElement, {
         category: {
           $in: ['recruit:category:Other', 'document:category:Other', 'tracker:category:Other'] as Ref<TagCategory>[]
@@ -669,8 +670,7 @@ export async function restoreRecruitingTaskTypes (
   transactorUrl: string
 ): Promise<void> {
   const connection = (await connect(transactorUrl, workspaceId, undefined, {
-    mode: 'backup',
-    model: 'upgrade'
+    mode: 'backup'
   })) as unknown as CoreClient & BackupClient
   const client = getMongoClient(mongoUrl)
   try {
@@ -772,6 +772,7 @@ export async function restoreRecruitingTaskTypes (
         statusCategories.sort(compareCategories)
 
         const createTxNew: TxCreateDoc<TaskType> = {
+          _uuid: workspaceId,
           _id: generateId(),
           _class: core.class.TxCreateDoc,
           space: core.space.Tx,
@@ -822,7 +823,9 @@ export async function restoreRecruitingTaskTypes (
   } catch (err: any) {
     console.trace(err)
   } finally {
+    // TODO: Add force-close
     client.close()
+    await connection.sendForceClose()
     await connection.close()
   }
 }
@@ -833,8 +836,7 @@ export async function restoreHrTaskTypesFromUpdates (
   transactorUrl: string
 ): Promise<void> {
   const connection = (await connect(transactorUrl, workspaceId, undefined, {
-    mode: 'backup',
-    model: 'upgrade'
+    mode: 'backup'
   })) as unknown as CoreClient & BackupClient
   const client = getMongoClient(mongoUrl)
   try {
@@ -927,6 +929,7 @@ export async function restoreHrTaskTypesFromUpdates (
         const ofClassClass = hierarchy.getClass(recruit.class.Applicant)
 
         await db.collection<TxCreateDoc<Doc>>(DOMAIN_TX).insertOne({
+          _uuid: workspaceId,
           _id: generateId(),
           _class: core.class.TxCreateDoc,
           space: core.space.Tx,
@@ -946,6 +949,7 @@ export async function restoreHrTaskTypesFromUpdates (
         })
 
         createTaskTypeTx = {
+          _uuid: workspaceId,
           _id: generateId(),
           _class: core.class.TxCreateDoc,
           space: core.space.Tx,
@@ -980,6 +984,7 @@ export async function restoreHrTaskTypesFromUpdates (
       const ofClassClass = hierarchy.getClass(recruit.class.Vacancy)
 
       await db.collection<TxCreateDoc<Doc>>(DOMAIN_TX).insertOne({
+        _uuid: workspaceId,
         _id: generateId(),
         _class: core.class.TxCreateDoc,
         space: core.space.Tx,
@@ -999,6 +1004,7 @@ export async function restoreHrTaskTypesFromUpdates (
       })
 
       const createProjectTypeTx: TxCreateDoc<ProjectType> = {
+        _uuid: workspaceId,
         _id: generateId(),
         _class: core.class.TxCreateDoc,
         space: core.space.Tx,
@@ -1031,6 +1037,7 @@ export async function restoreHrTaskTypesFromUpdates (
     console.trace(err)
   } finally {
     client.close()
+    await connection.sendForceClose()
     await connection.close()
   }
 }

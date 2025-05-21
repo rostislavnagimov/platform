@@ -192,7 +192,7 @@ async function applyPatchesToGroup (
       parsedFile.metadata.toDate,
       updatedMessages.length
     )
-    await removeGroup(client, group.card, group.blobId)
+    await removeGroup(client, group.card, group.blobId as any)
     await removePatches(db, workspace, card, Array.from(patchesByMessage.keys()))
     await removeFile(storage, ctx, workspace, group.blobId)
   } catch (error) {
@@ -353,7 +353,7 @@ async function pushMessagesToGroup (
       .sort((a, b) => a.created.getTime() - b.created.getTime())
     const blob = await uploadGroupFile(ctx, storage, workspace, parsedFile.metadata, newMessages)
     await removeFile(storage, ctx, workspace, group.blobId)
-    await removeGroup(client, group.card, group.blobId)
+    await removeGroup(client, group.card, group.blobId as any)
     await createGroup(
       client,
       group.card,
